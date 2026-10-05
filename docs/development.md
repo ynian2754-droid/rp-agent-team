@@ -5,7 +5,7 @@ This repository contains the removable ElecKoi DSH plugin source plus a separate
 ## Requirements and commands
 
 - Node.js 22+
-- pnpm 10+
+- pnpm 11.22.0
 - ElecKoi source at the fixed commit in [the compatibility note](../README.md#install)
 
 ```sh

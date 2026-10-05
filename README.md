@@ -26,7 +26,7 @@ Read the [creator manual in Chinese](docs/user-manual.zh-CN.md) or the [full aut
 
 ## Build from source
 
-Requirements: Node.js 22 or later and pnpm 10.
+Requirements: Node.js 22 or later and pnpm 11.22.0.
 
 ```sh
 pnpm install --frozen-lockfile
