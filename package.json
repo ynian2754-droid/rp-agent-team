@@ -1,0 +1,282 @@
+{
+  "name": "@rp-team/dsh-roleplay-team",
+  "version": "0.4.0",
+  "description": "Configurable agent teams for ElecKoi roleplay",
+  "license": "AGPL-3.0-or-later",
+  "licenseFile": "LICENSE",
+  "type": "module",
+  "main": "./dist/host/index.mjs",
+  "exports": {
+    ".": "./dist/host/index.mjs",
+    "./client": "./dist/client.js",
+    "./typert": {
+      "types": "./lib/typert.host.d.ts",
+      "default": "./lib/typert.host.js"
+    },
+    "./remote": {
+      "types": "./lib/typert.remote-client.d.ts",
+      "default": "./lib/typert.remote-client.js"
+    },
+    "./types": {
+      "types": "./dist/host/remote-types.d.ts",
+      "default": "./dist/host/remote-types.js"
+    },
+    "./slots": {
+      "types": "./src/slots.d.ts"
+    },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "dist",
+    "lib/typert.host.js",
+    "lib/typert.host.d.ts",
+    "lib/typert.remote-client.js",
+    "lib/typert.remote-client.d.ts",
+    "dist/host/remote-types.js",
+    "dist/host/remote-types.d.ts",
+    "src",
+    "scripts",
+    "test",
+    "tests",
+    "locale",
+    "cordis.patch.yml",
+    "patches",
+    "pnpm-workspace.yaml",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md",
+    "pnpm-lock.yaml",
+    "examples",
+    "预设作者指南.md",
+    "docs/authoring-0.4.0.md",
+    "docs/implementation-0.4.0.md",
+    "docs/user-manual.zh-CN.md",
+    "docs/install-guide.zh-CN.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test:client": "node --test test/*.test.mjs",
+    "test": "node --test test/*.test.mjs tests/*.test.mjs",
+    "preview:build": "node scripts/build-preview.mjs",
+    "preview:serve": "node scripts/serve-preview.mjs",
+    "pack:dshbundle": "node scripts/build.mjs && node scripts/pack.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-typert-generator": "0.2.0-rc.2",
+    "esbuild": "0.25.12",
+    "typescript": "6.0.3",
+    "zod": "4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-experimental-agent-team": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-scope": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2",
+    "yaml": "2.9.0"
+  },
+  "engines": {
+    "dsh": "0.2.0-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-gateway",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@eleckoi/dsh-client-conversations"
+      ]
+    }
+  },
+  "eleckoi": {
+    "developerInterfaces": [
+      {
+        "id": "rpAgentTeam",
+        "kind": "service",
+        "title": "RP Agent Team Runtime",
+        "description": "为一个稳定的产品会话提供 Team 配置、执行、重试和追踪方法。",
+        "mode": "call",
+        "scope": "host",
+        "relation": "provides",
+        "members": [
+          "getConfig",
+          "saveConfig",
+          "getOptions",
+          "getStatus",
+          "cancel",
+          "retry",
+          "discardRetry",
+          "exportConfig",
+          "setManualAgents",
+          "listTraces",
+          "getTrace",
+          "importConfig",
+          "getContextCatalog",
+          "previewConfig",
+          "getState",
+          "listStateCheckpoints",
+          "applyStateEdit",
+          "getStateEditStatus",
+          "restoreStateCheckpoint",
+          "listPresets",
+          "getPreset",
+          "savePreset",
+          "copyPreset",
+          "deletePreset",
+          "exportPreset",
+          "importPreset",
+          "exportComponent",
+          "prepareComponentImport",
+          "previewParameters",
+          "listTrialScenarios",
+          "getTrialScenario",
+          "saveTrialScenario",
+          "deleteTrialScenario",
+          "exportTrialScenario",
+          "importTrialScenario",
+          "freezeTrialSnapshot",
+          "startTrial",
+          "listTrials",
+          "getTrial",
+          "cancelTrial",
+          "retryTrial",
+          "getTrialTrajectory",
+          "compareTrial"
+        ]
+      },
+      {
+        "id": "rpTeam",
+        "kind": "remote",
+        "title": "RP Agent Team",
+        "description": "读取并维护 RP Agent Team 配置、运行状态与追踪记录。",
+        "mode": "call",
+        "scope": "host",
+        "relation": "provides",
+        "members": [
+          "getConfig",
+          "saveConfig",
+          "getOptions",
+          "getStatus",
+          "cancel",
+          "retry",
+          "discardRetry",
+          "exportConfig",
+          "setManualAgents",
+          "listTraces",
+          "getTrace",
+          "importConfig",
+          "getContextCatalog",
+          "previewConfig",
+          "getState",
+          "listStateCheckpoints",
+          "applyStateEdit",
+          "getStateEditStatus",
+          "restoreStateCheckpoint",
+          "listPresets",
+          "getPreset",
+          "savePreset",
+          "copyPreset",
+          "deletePreset",
+          "exportPreset",
+          "importPreset",
+          "exportComponent",
+          "prepareComponentImport",
+          "previewParameters",
+          "listTrialScenarios",
+          "getTrialScenario",
+          "saveTrialScenario",
+          "deleteTrialScenario",
+          "exportTrialScenario",
+          "importTrialScenario",
+          "freezeTrialSnapshot",
+          "startTrial",
+          "listTrials",
+          "getTrial",
+          "cancelTrial",
+          "retryTrial",
+          "getTrialTrajectory",
+          "compareTrial"
+        ]
+      },
+      {
+        "id": "rpTeamSidebarTab",
+        "kind": "contribution",
+        "title": "RP Team 工作区标签",
+        "description": "向官方右侧栏标签注册器注册 RP Team 工作区页面。",
+        "mode": "register",
+        "scope": "client",
+        "relation": "contributes",
+        "owner": "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "members": [
+          "register"
+        ]
+      },
+      {
+        "id": "sidebar.right.pane.tab",
+        "kind": "ui-slot",
+        "title": "RP Team 工作区正文",
+        "description": "在官方右侧栏编辑团队成员与配置。",
+        "mode": "keyed",
+        "scope": "session",
+        "relation": "contributes",
+        "owner": "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "members": [
+          "rp-team"
+        ]
+      },
+      {
+        "id": "eleckoiTrajectory",
+        "kind": "service",
+        "title": "团队主轨迹来源",
+        "description": "以持久运行关联提供成员原生会话及结构化观测事件。",
+        "mode": "register",
+        "scope": "client",
+        "relation": "contributes",
+        "owner": "@eleckoi/dsh-client-conversations",
+        "members": [
+          "registerSource"
+        ]
+      },
+      {
+        "id": "eleckoiTrialSnapshots",
+        "kind": "service",
+        "title": "试演资料快照",
+        "description": "冻结并在独立空间导入所选聊天资料。",
+        "mode": "call",
+        "scope": "host",
+        "relation": "consumes",
+        "owner": "@eleckoi/dsh-client-roleplay",
+        "members": [
+          "freeze",
+          "seed",
+          "getHostRoot",
+          "captureModelProviders",
+          "captureAgentPresets"
+        ]
+      },
+      {
+        "id": "eleckoiTrajectory",
+        "kind": "service",
+        "title": "试演原生轨迹",
+        "description": "在试演页面复用正式轨迹组件。",
+        "mode": "call",
+        "scope": "client",
+        "relation": "consumes",
+        "owner": "@eleckoi/dsh-client-conversations",
+        "members": [
+          "renderSnapshot"
+        ]
+      }
+    ]
+  },
+  "repository": "https://github.com/ynian2754-droid/rp-agent-team.git",
+  "homepage": "https://github.com/ynian2754-droid/rp-agent-team#readme",
+  "bugs": {
+    "url": "https://github.com/ynian2754-droid/rp-agent-team/issues"
+  }
+}

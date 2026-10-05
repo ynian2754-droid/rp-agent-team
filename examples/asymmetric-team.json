@@ -1,0 +1,358 @@
+{
+  "format": "rp-team-preset-v2",
+  "dependencies": {
+    "presets": [],
+    "models": [],
+    "toolGroups": []
+  },
+  "config": {
+    "schemaVersion": 2,
+    "id": "asymmetric-example",
+    "name": "Asymmetric Coordination Example",
+    "version": "1.0.0",
+    "metadata": {
+      "example": true
+    },
+    "agents": [
+      {
+        "id": "agent-1",
+        "name": "World Observer",
+        "description": "Read private world truth and turn relevant details into a safe observation for the perception agent.",
+        "systemPrompt": "Read declared world truth and form a concise observation for Perception. If a prior memory would help, request Long Memory with rp_team_request; a request only queues work, so do not wait or poll during this activation. Finish this activation so the scheduler can run the requested work before Perception, then send only safe observations. Never send raw hidden state to the scene actor or write the user-facing scene.",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "always"
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "current_input"
+            },
+            {
+              "type": "recent_history",
+              "limit": 12
+            },
+            {
+              "type": "hidden_state",
+              "selector": "/variables/truth"
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [
+            "agent-2",
+            "agent-3"
+          ],
+          "receiveFrom": [],
+          "requestTo": [
+            "agent-2"
+          ],
+          "requestFrom": []
+        },
+        "statePermissions": [
+          {
+            "namespace": "world",
+            "path": "/variables/truth",
+            "access": "read"
+          },
+          {
+            "namespace": "world",
+            "path": "/variables/memory",
+            "access": "read"
+          },
+          {
+            "namespace": "shared",
+            "path": "/observations/agent-1",
+            "access": "write"
+          }
+        ],
+        "outputAuthority": {
+          "internal": true,
+          "draft": true,
+          "state": true,
+          "user": false
+        },
+        "execution": {
+          "after": [],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      },
+      {
+        "id": "agent-2",
+        "name": "Long Memory",
+        "description": "Retrieve only the prior memories relevant to this scene and share a short excerpt when requested.",
+        "systemPrompt": "When requested, select only the few long-term memories that matter to the current scene and preserve their source and uncertainty. Send the concise result to Perception with rp_team_send before returning. You are intentionally skipped when no memory lookup is needed.",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "requested_by_agent",
+            "from": [
+              "agent-1"
+            ]
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "long_memory",
+              "selector": "/variables/memory"
+            },
+            {
+              "type": "current_input"
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [
+            "agent-3"
+          ],
+          "receiveFrom": [
+            "agent-1"
+          ],
+          "requestTo": [],
+          "requestFrom": [
+            "agent-1"
+          ]
+        },
+        "statePermissions": [
+          {
+            "namespace": "world",
+            "path": "/variables/memory",
+            "access": "read"
+          },
+          {
+            "namespace": "shared",
+            "path": "/memory-context/agent-2",
+            "access": "write"
+          }
+        ],
+        "outputAuthority": {
+          "internal": true,
+          "draft": true,
+          "state": true,
+          "user": false
+        },
+        "execution": {
+          "after": [],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      },
+      {
+        "id": "agent-3",
+        "name": "Perception",
+        "description": "Transform world observations and optional memories into a character’s subjective view.",
+        "systemPrompt": "You do not have direct access to private world truth. Wait for the Observer and any requested Long Memory activation to settle, then transform their messages into what the character might notice, believe, or misunderstand. If memory was not requested or its activation failed, continue from the available observation without inventing a memory result. Keep beliefs separate from facts.",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "always"
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "current_input"
+            },
+            {
+              "type": "recent_history",
+              "limit": 12
+            },
+            {
+              "type": "character_card"
+            },
+            {
+              "type": "agent_messages",
+              "agentIds": [
+                "agent-1",
+                "agent-2"
+              ]
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [
+            "agent-4"
+          ],
+          "receiveFrom": [
+            "agent-1",
+            "agent-2"
+          ],
+          "requestTo": [],
+          "requestFrom": []
+        },
+        "statePermissions": [
+          {
+            "namespace": "shared",
+            "path": "/observations/agent-1",
+            "access": "read"
+          },
+          {
+            "namespace": "shared",
+            "path": "/memory-context/agent-2",
+            "access": "read"
+          },
+          {
+            "namespace": "shared",
+            "path": "/perceptions/agent-3",
+            "access": "readwrite"
+          }
+        ],
+        "outputAuthority": {
+          "internal": true,
+          "draft": false,
+          "state": true,
+          "user": false
+        },
+        "execution": {
+          "after": [
+            "agent-1",
+            "agent-2"
+          ],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      },
+      {
+        "id": "agent-4",
+        "name": "Scene Actor",
+        "description": "Write the user-facing scene using character perceptions and relevant memories.",
+        "systemPrompt": "Write the finished roleplay scene from the character’s available perspective. Use observations as clues and memories as recollections; either may be incomplete or mistaken. You have no access to hidden world truth. Preserve the established character voice.",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "always"
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "current_input"
+            },
+            {
+              "type": "recent_history",
+              "limit": 12
+            },
+            {
+              "type": "character_card"
+            },
+            {
+              "type": "agent_messages",
+              "agentIds": [
+                "agent-2",
+                "agent-3"
+              ]
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [],
+          "receiveFrom": [
+            "agent-2",
+            "agent-3"
+          ],
+          "requestTo": [],
+          "requestFrom": []
+        },
+        "statePermissions": [
+          {
+            "namespace": "shared",
+            "path": "/perceptions/agent-3",
+            "access": "read"
+          },
+          {
+            "namespace": "shared",
+            "path": "/memory-context/agent-2",
+            "access": "read"
+          }
+        ],
+        "outputAuthority": {
+          "internal": true,
+          "draft": true,
+          "state": false,
+          "user": true
+        },
+        "execution": {
+          "after": [
+            "agent-3"
+          ],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      }
+    ],
+    "state": {
+      "definitions": [
+        {
+          "namespace": "world",
+          "path": "/variables/truth",
+          "type": "object",
+          "default": {
+            "visitor": "Mara",
+            "purpose": "She left a warning."
+          }
+        },
+        {
+          "namespace": "world",
+          "path": "/variables/memory",
+          "type": "array",
+          "default": []
+        },
+        {
+          "namespace": "shared",
+          "path": "/observations/agent-1",
+          "type": "object",
+          "default": {}
+        },
+        {
+          "namespace": "shared",
+          "path": "/memory-context/agent-2",
+          "type": "array",
+          "default": []
+        },
+        {
+          "namespace": "shared",
+          "path": "/perceptions/agent-3",
+          "type": "object",
+          "default": {
+            "belief": "The visitor may be a courier."
+          }
+        },
+        {
+          "namespace": "shared",
+          "path": "/drafts/scene",
+          "type": "string",
+          "default": ""
+        }
+      ]
+    },
+    "execution": {
+      "concurrency": 4,
+      "maxActivations": 32,
+      "maxPerAgent": 3,
+      "maxDepth": 4
+    },
+    "output": {
+      "agentId": "agent-4"
+    }
+  }
+}

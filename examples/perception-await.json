@@ -1,0 +1,217 @@
+{
+  "format": "rp-team-preset-v2",
+  "dependencies": {
+    "minimumPluginVersion": "0.3.0",
+    "presets": [],
+    "models": [],
+    "toolGroups": []
+  },
+  "config": {
+    "schemaVersion": 2,
+    "id": "author-perception-await",
+    "name": "先观察，再回应",
+    "version": "0.3.0",
+    "metadata": {
+      "author": "RP Team example",
+      "description": "通过配置定义主观信息边界与不同的交接方式。"
+    },
+    "agents": [
+      {
+        "id": "actor",
+        "name": "角色的主观认知",
+        "description": "Notice the details that should guide the next scene.",
+        "systemPrompt": "只根据你实际能看到的输入、历史和返回的感官信息扮演角色。需要确认环境时，通过交接规则 perception 调用 environment。拿到结果后在本次执行中继续。 不强求剧情推进，不把内部分析写成正文。",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "always"
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "current_input"
+            },
+            {
+              "type": "recent_history",
+              "limit": 8
+            },
+            {
+              "type": "agent_messages",
+              "agentIds": [
+                "environment"
+              ]
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [],
+          "receiveFrom": [
+            "environment"
+          ],
+          "requestTo": [
+            "environment"
+          ],
+          "requestFrom": [],
+          "handoffs": [
+            {
+              "id": "perception",
+              "to": "environment",
+              "mode": "await",
+              "timeoutMs": 300000,
+              "onFailure": "return_error",
+              "requestSelectors": [
+                "/summary",
+                "/data/question"
+              ],
+              "responseSchema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "sensory": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "sensory"
+                    ]
+                  }
+                },
+                "required": [
+                  "data"
+                ]
+              },
+              "responseSelectors": [
+                "/data/sensory"
+              ]
+            }
+          ]
+        },
+        "statePermissions": [
+          {
+            "namespace": "private:actor",
+            "path": "/attention",
+            "access": "readwrite"
+          }
+        ],
+        "outputAuthority": {
+          "internal": true,
+          "draft": true,
+          "state": true,
+          "user": true
+        },
+        "execution": {
+          "after": [],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      },
+      {
+        "id": "environment",
+        "name": "环境与可感知信息",
+        "description": "Notice the details that should guide the next scene.",
+        "systemPrompt": "描述角色此刻通过身体和感官可以获知的信息。把这些内容放在 submit_internal 的 data.sensory 中；未被感知的客观信息可以另放 data.objective。只回应本次请求，不主动规定故事目标。",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "requested_by_agent",
+            "from": [
+              "actor"
+            ]
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "current_input"
+            },
+            {
+              "type": "recent_history",
+              "limit": 8
+            },
+            {
+              "type": "worldbook"
+            },
+            {
+              "type": "character_card"
+            },
+            {
+              "type": "hidden_state"
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [
+            "actor"
+          ],
+          "receiveFrom": [],
+          "requestTo": [],
+          "requestFrom": [
+            "actor"
+          ]
+        },
+        "statePermissions": [],
+        "outputAuthority": {
+          "internal": true,
+          "draft": false,
+          "state": false,
+          "user": false
+        },
+        "execution": {
+          "after": [],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      }
+    ],
+    "state": {
+      "definitions": [
+        {
+          "namespace": "private:actor",
+          "path": "/attention",
+          "type": "object",
+          "valueSchema": {
+            "type": "object",
+            "properties": {
+              "focus": {
+                "type": "string"
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "focus",
+              "confidence"
+            ]
+          },
+          "default": {
+            "focus": "",
+            "confidence": 0.5
+          }
+        }
+      ]
+    },
+    "execution": {
+      "concurrency": 1,
+      "maxActivations": 32,
+      "maxPerAgent": 3,
+      "maxDepth": 4
+    },
+    "output": {
+      "agentId": "actor"
+    }
+  }
+}

@@ -1,0 +1,145 @@
+{
+  "format": "rp-team-preset-v2",
+  "dependencies": {
+    "presets": [],
+    "models": [],
+    "toolGroups": []
+  },
+  "config": {
+    "schemaVersion": 2,
+    "id": "roleplay-team",
+    "name": "Roleplay Team",
+    "version": "1.0.0",
+    "metadata": {},
+    "agents": [
+      {
+        "id": "agent-1",
+        "name": "Agent 1",
+        "description": "Notice the details that should guide the next scene.",
+        "systemPrompt": "Review the current input and recent history. Identify relevant character, continuity, and scene details. Send a concise context note to Agent 2; do not write the user-facing scene.",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "always"
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "current_input"
+            },
+            {
+              "type": "recent_history",
+              "limit": 12
+            },
+            {
+              "type": "character_card"
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [
+            "agent-2"
+          ],
+          "receiveFrom": [
+            "agent-2"
+          ],
+          "requestTo": [
+            "agent-2"
+          ],
+          "requestFrom": []
+        },
+        "statePermissions": [],
+        "outputAuthority": {
+          "internal": true,
+          "draft": true,
+          "state": true,
+          "user": false
+        },
+        "execution": {
+          "after": [],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      },
+      {
+        "id": "agent-2",
+        "name": "Agent 2",
+        "description": "Continue the scene using the supplied context.",
+        "systemPrompt": "Write a natural roleplay continuation grounded in the current character and scene. Use Agent 1’s context note, preserve the established voice, and return the finished scene for the user.",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "always"
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "current_input"
+            },
+            {
+              "type": "recent_history",
+              "limit": 12
+            },
+            {
+              "type": "character_card"
+            },
+            {
+              "type": "agent_messages",
+              "agentIds": [
+                "agent-1"
+              ]
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [
+            "agent-1"
+          ],
+          "receiveFrom": [
+            "agent-1"
+          ],
+          "requestTo": [],
+          "requestFrom": [
+            "agent-1"
+          ]
+        },
+        "statePermissions": [],
+        "outputAuthority": {
+          "internal": true,
+          "draft": true,
+          "state": true,
+          "user": true
+        },
+        "execution": {
+          "after": [
+            "agent-1"
+          ],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      }
+    ],
+    "state": {
+      "definitions": []
+    },
+    "execution": {
+      "concurrency": 4,
+      "maxActivations": 32,
+      "maxPerAgent": 3,
+      "maxDepth": 4
+    },
+    "output": {
+      "agentId": "agent-2"
+    }
+  }
+}

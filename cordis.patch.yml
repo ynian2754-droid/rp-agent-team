@@ -1,0 +1,3 @@
+- insert:
+    - id: rp-agent-team-native-service
+      name: './dist/host/native-service.mjs'

@@ -1,0 +1,13 @@
+diff --git a/lib/index.js b/lib/index.js
+index abf9801..ca9b94d 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1397,6 +1397,8 @@ var WorkspaceAnalyzer = class {
+ 		if (resolved.name !== name) return false;
+ 		const declaration = preferredDeclaration(resolved);
+ 		if (declaration === void 0) return false;
++		const declarationFile = realPath(declaration.getSourceFile().fileName).replaceAll("\\", "/");
++		if (declarationFile.includes("/node_modules/@deepseek-ai/dsh-typert-protocol/")) return true;
+ 		if (this.registrationForFile(declaration.getSourceFile().fileName)?.name === "@deepseek-ai/dsh-typert-protocol") return true;
+ 		for (let current = declaration; current !== void 0; current = optionalParent(current)) if (ts.isModuleDeclaration(current) && ts.isStringLiteral(current.name) && current.name.text === "@deepseek-ai/dsh-typert-protocol") return true;
+ 		return false;

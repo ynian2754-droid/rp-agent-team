@@ -1,0 +1,36 @@
+{
+  "format": "rp-team-trial-scenario",
+  "version": 1,
+  "scenario": {
+    "name": "三轮中性试演",
+    "steps": [
+      {
+        "id": "input-1",
+        "inputText": "我把窗户打开，坐回原来的位置。",
+        "assertions": [
+          {
+            "type": "single_output"
+          }
+        ]
+      },
+      {
+        "id": "input-2",
+        "inputText": "外面的风声比刚才大了一些。",
+        "assertions": [
+          {
+            "type": "single_output"
+          }
+        ]
+      },
+      {
+        "id": "input-3",
+        "inputText": "我什么也没说，等了一会儿。",
+        "assertions": [
+          {
+            "type": "single_output"
+          }
+        ]
+      }
+    ]
+  }
+}

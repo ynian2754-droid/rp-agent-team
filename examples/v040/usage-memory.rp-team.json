@@ -1,0 +1,192 @@
+{
+  "format": "rp-team-preset-v2",
+  "dependencies": {
+    "minimumPluginVersion": "0.4.0",
+    "presets": [],
+    "models": [],
+    "toolGroups": []
+  },
+  "config": {
+    "schemaVersion": 2,
+    "id": "author-example-v040",
+    "name": "可调语气与角色记忆",
+    "version": "0.4.0",
+    "metadata": {
+      "author": "RP Team",
+      "description": "参数和记忆的中性示例；行为由作者的提示词与权限决定。"
+    },
+    "agents": [
+      {
+        "id": "agent-1",
+        "name": "Agent 1",
+        "description": "Notice the details that should guide the next scene.",
+        "systemPrompt": "Review the current input and recent history. Identify relevant character, continuity, and scene details. Send a concise context note to Agent 2; do not write the user-facing scene.",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "always"
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "current_input"
+            },
+            {
+              "type": "recent_history",
+              "limit": 12
+            },
+            {
+              "type": "character_card"
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [
+            "agent-2"
+          ],
+          "receiveFrom": [
+            "agent-2"
+          ],
+          "requestTo": [
+            "agent-2"
+          ],
+          "requestFrom": []
+        },
+        "statePermissions": [],
+        "outputAuthority": {
+          "internal": true,
+          "draft": true,
+          "state": true,
+          "user": false
+        },
+        "execution": {
+          "after": [],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      },
+      {
+        "id": "agent-2",
+        "name": "Agent 2",
+        "description": "Continue the scene using the supplied context.",
+        "systemPrompt": "Write a natural roleplay continuation grounded in the current character and scene. Use Agent 1’s context note, preserve the established voice, and return the finished scene for the user.\n作者选择的表达倾向：{{param:tone}}。如有需要，可使用记忆工具保存或检索自己的记忆；不必每轮都做。",
+        "modelRef": "inherit",
+        "parameters": {},
+        "presetId": "",
+        "capabilities": [],
+        "compaction": {},
+        "triggers": [
+          {
+            "type": "always"
+          }
+        ],
+        "context": {
+          "sources": [
+            {
+              "type": "current_input"
+            },
+            {
+              "type": "recent_history",
+              "limit": 12
+            },
+            {
+              "type": "character_card"
+            },
+            {
+              "type": "agent_messages",
+              "agentIds": [
+                "agent-1"
+              ]
+            }
+          ]
+        },
+        "communication": {
+          "sendTo": [
+            "agent-1"
+          ],
+          "receiveFrom": [
+            "agent-1"
+          ],
+          "requestTo": [],
+          "requestFrom": [
+            "agent-1"
+          ]
+        },
+        "statePermissions": [
+          {
+            "namespace": "shared",
+            "path": "/memories",
+            "access": "readwrite"
+          }
+        ],
+        "outputAuthority": {
+          "internal": true,
+          "draft": true,
+          "state": true,
+          "user": true
+        },
+        "execution": {
+          "after": [
+            "agent-1"
+          ],
+          "onFailure": "continue",
+          "trustedTools": []
+        }
+      }
+    ],
+    "state": {
+      "definitions": [
+        {
+          "namespace": "shared",
+          "path": "/memories",
+          "type": "array",
+          "default": []
+        }
+      ]
+    },
+    "execution": {
+      "concurrency": 4,
+      "maxActivations": 32,
+      "maxPerAgent": 3,
+      "maxDepth": 4
+    },
+    "output": {
+      "agentId": "agent-2"
+    },
+    "authorParameters": [
+      {
+        "id": "tone",
+        "name": "表达倾向",
+        "type": "text",
+        "description": "影响提示词中的表达倾向，不改变模型或权限。",
+        "default": "自然、平实；允许停顿、犹豫和微小反应。",
+        "bindings": [
+          {
+            "target": {
+              "kind": "agent",
+              "agentId": "agent-2",
+              "path": "/systemPrompt"
+            },
+            "mode": "text"
+          }
+        ]
+      }
+    ],
+    "memory": {
+      "collections": [
+        {
+          "id": "character-recollection",
+          "name": "角色的回忆",
+          "namespace": "shared",
+          "path": "/memories",
+          "description": "可以不完整、带主观偏见；不会自动修正为客观真相。"
+        }
+      ]
+    }
+  }
+}
