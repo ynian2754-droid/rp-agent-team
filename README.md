@@ -12,6 +12,10 @@ The target is the Windows x64 build source of ElecKoi `0.2.21` at [`924e30a`](ht
 2. Follow [Install and upgrade](docs/install-guide.zh-CN.md) to patch the supported ElecKoi source, build it and import the archive through the DSH plugin manager.
 3. Open a roleplay chat and enable **角色团队** in the composer. Disable it any time to return to ordinary chat on the next turn.
 
+### Download presets · 预设下载
+
+Choose a `.rp-team.json` file from the [preset repository](https://github.com/ynian2754-droid/rp-agent-team-presets), or [download all presets and rehearsal scenarios as a ZIP](https://github.com/ynian2754-droid/rp-agent-team-presets/archive/refs/heads/main.zip). Import the preset in ElecKoi under **角色团队 → 预设**.
+
 Read the [creator manual in Chinese](docs/user-manual.zh-CN.md) or the [full authoring guide](docs/authoring-0.4.0.md) before building a preset. The `examples/` folder contains ready-to-import team and rehearsal examples.
 
 ## What it does
