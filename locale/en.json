@@ -1,4 +1,6 @@
 {
+  "teamDataToolsHelp": "Context controls data reads; state permissions control variable, setting and memory edits. Members use Team-owned tools instead of ElecKoi product tools.",
+  "productToolsReplaced": "Preserved for legacy configuration compatibility. This does not grant host tools or limit authorized Team data reads.",
   "team": "Roleplay team",
   "settingsTitle": "Compose cognition and collaboration",
   "toolLabels": {
@@ -53,7 +55,7 @@
   "statusUnavailable": "Team status unavailable",
   "viewRun": "View this run",
   "viewReason": "See why",
-  "viewCollaboration": "Collaboration trace",
+  "viewCollaboration": "Collaboration",
   "memberCount": "{n} members",
   "status": {
     "preparing": "Preparing members",
@@ -155,13 +157,18 @@
     "publishes": "writes the reply",
     "noAuthority": "no output",
     "tools": "{n} tools",
-    "trusted": "{n} trusted external tools"
+    "trusted": "{n} trusted external tools",
+    "handoffs": "Hands off to {names}"
   },
   "triggerShort": {
     "always": "Every turn",
     "manual": "Manual",
     "requested_by_agent": "On request",
-    "condition": "On condition"
+    "condition": "On condition",
+    "periodic": "Periodic",
+    "keyword": "On keyword",
+    "state_changed": "On state change",
+    "message_received": "On message"
   },
   "sourceShort": {
     "current_input": "input",
@@ -812,7 +819,8 @@
     "dismissUnknown": "Dismiss this outcome check",
     "confirmDismissUnknown": "Confirm dismissing; preserve draft",
     "committedValue": "Committed value",
-    "unknownPastValues": "Some historical values were not recorded. Select known values; current values will not replace missing history."
+    "unknownPastValues": "Some historical values were not recorded. Select known values; current values will not replace missing history.",
+    "emptyValue": "(empty)"
   },
   "params": {
     "title": "Usage parameters",
@@ -821,14 +829,18 @@
     "empty": "No usage parameters defined.",
     "changes": "Inspect resolved changes",
     "author": "Author: define parameters",
-    "authorHelp": "Bind a parameter to one or more editable fields, or insert text through its marker. Permission changes are included in the preview.",
+    "authorHelp": "Bind a parameter to one or more editable fields, or insert it into prompts through its marker. Text, numbers, choices and switches can all be inserted: a choice or switch inserts the text the author wrote for each setting, like toggling a preset entry. Permission changes are included in the preview.",
     "type": "Parameter type",
     "default": "Author default",
     "constraints": "Value requirements",
     "new": "New parameter",
+    "group": "Group",
+    "groupHint": "Parameters in the same group are shown together on the parameters page, for example Presentation or Adjudication. Leave empty for no group.",
     "add": "Add parameter",
     "optionName": "Option label",
     "addOption": "Add option",
+    "optionText": "Text inserted when chosen",
+    "optionTextHint": "When the parameter is bound with \"Replace text marker\", choosing this option puts this text at the marker. May be empty.",
     "bindings": "What this parameter changes",
     "target": "Target scope",
     "stateInitial": "Initial state value",
@@ -837,6 +849,11 @@
     "mode": "Apply mode",
     "set": "Set value",
     "text": "Replace text marker",
+    "textOn": "Text inserted when on",
+    "textOff": "Text inserted when off",
+    "switchTextHint": "Used when bound with \"Replace text marker\". Leave empty to insert nothing.",
+    "inserts": "Show inserted text",
+    "insertsEmpty": "This setting inserts no text.",
     "permissionHelp": "Permission edits change visibility or capabilities; inspect resolved changes.",
     "valuePart": "Use part of a parameter value",
     "valuePath": "Value path (empty uses the whole value)",
@@ -970,7 +987,242 @@
     "resubmit": "Resubmit the same start request",
     "uncommitted": "This attempt committed no body or state. Retry continues from the last committed checkpoint.",
     "source": "Frozen source: {id}",
-    "usageUnknown": "Some requests did not return complete usage. A token-limited task cannot dispatch further calls; committed results and execution records remain available."
+    "usageUnknown": "Some requests did not return complete usage. A token-limited task cannot dispatch further calls; committed results and execution records remain available.",
+    "pick": "Scene",
+    "noSecond": "No comparison, run the draft only",
+    "secondHelp": "The library has nothing to compare against yet. Save another version on the Presets page first.",
+    "budgets": "Limits for this trial",
+    "needInput": "Every turn needs an input.",
+    "loadingB": "Loading variant B…",
+    "freezeHelp": "Without a snapshot, each trial reads the latest chat data.",
+    "saveFirst": "The scene has not been saved yet.",
+    "sceneFile": "Scene file",
+    "pickJob": "Choose a trial",
+    "turnDetails": "State and details of this turn"
   },
-  "turnN": "Turn {n}"
+  "turnN": "Turn {n}",
+  "nav": {
+    "run": "Round",
+    "team": "Team",
+    "presets": "Presets",
+    "trial": "Trial",
+    "state": "State"
+  },
+  "navHint": {
+    "run": "Who took part this round, how it ended, and who runs next",
+    "team": "Members, parameters and team settings",
+    "presets": "Import, export and the local preset library",
+    "trial": "Check the configuration without a model call, or rehearse in an isolated space",
+    "state": "State values and memory of this chat"
+  },
+  "teamNav": {
+    "label": "Team contents",
+    "members": "Members",
+    "params": "Parameters",
+    "settings": "Settings"
+  },
+  "mtab": {
+    "label": "Member settings",
+    "now": "Now",
+    "prompt": "Prompt",
+    "model": "Model",
+    "trigger": "When",
+    "context": "Sees",
+    "links": "Links",
+    "access": "Access"
+  },
+  "mtabHint": {
+    "prompt": "Name, description and system prompt",
+    "model": "Model, parameters and preset",
+    "trigger": "When it takes part, whom it waits for, what happens on failure",
+    "context": "What it can read while running",
+    "links": "Whom it can message and hand off to",
+    "access": "State access, reply output and tools"
+  },
+  "shell": {
+    "offTitle": "The team is not enabled for this chat",
+    "offHelp": "Once enabled, the {n} members of \"{name}\" write replies together from the next message on. The switch applies immediately; nothing needs saving.",
+    "enable": "Enable team",
+    "enableHint": "Applies immediately and only to this chat. Configuration changes are saved separately.",
+    "off": "Off",
+    "unavailable": "Unavailable",
+    "versionLine": "v{version} · {n} members",
+    "draft": "Unsaved",
+    "liveIs": "Chat still uses \"{name}\"",
+    "unsaved": "Unsaved changes",
+    "addedMark": " (new)",
+    "teamSettings": "Team settings",
+    "field": "Input to fix",
+    "needsFix": "Something needs fixing",
+    "memberWorking": "{name} is working",
+    "viewRound": "View round",
+    "took": "{n} members took part",
+    "enableFailed": "Could not switch the team. Check the members’ Model tab and try again:",
+    "dismiss": "Dismiss",
+    "enableError": {
+      "RP_TEAM_CONFIG_CONFLICT": "The team settings were just saved elsewhere and have been reloaded; switch again.",
+      "RP_TEAM_MODEL_REQUIRED": "A member has no model selected.",
+      "RP_TEAM_UNSUPPORTED_MODEL_PARAMETER": "A member sets a parameter its model does not support (such as reasoning effort)."
+    }
+  },
+  "roster": {
+    "publisher": "Writes reply",
+    "added": "New, not saved yet",
+    "changed": "Changed, not saved yet",
+    "removed": "Removed (unsaved): {names}"
+  },
+  "when": {
+    "periodic": "Every {n} turns",
+    "requestedBy": "When {names} calls it",
+    "requested": "When called"
+  },
+  "idle": {
+    "noTrigger": "No way to take part is configured",
+    "notReached": "The round ended before its turn",
+    "onRequest": "Runs only when {names} calls it; nobody did this round",
+    "onRequestAny": "Runs only when another member calls it; nobody did this round",
+    "periodic": "Runs every {n} turns; this turn was off its cycle",
+    "manual": "Needs manual selection; it was not selected",
+    "condition": "Its condition was not met this round",
+    "keyword": "The input did not match its keywords",
+    "stateChanged": "The state it watches did not change",
+    "messageReceived": "It received no matching message"
+  },
+  "cause": {
+    "request": "Called by {name}",
+    "resume": "Resumed after a handoff returned",
+    "retry": "Rerun by a retry",
+    "trigger": "Triggered"
+  },
+  "next": {
+    "title": "Who runs next round",
+    "titleTurn": "Who runs next round (turn {n})",
+    "basedOnSaved": "Based on the saved configuration; unsaved changes are not counted.",
+    "failed": "The next round cannot be worked out right now.",
+    "loading": "Working it out…",
+    "always": "Runs every round",
+    "manualSelected": "Selected manually for the next round",
+    "manualIdle": "Needs manual selection",
+    "onRequest": "Runs only when {names} calls it",
+    "onRequestAny": "Runs only when another member calls it",
+    "periodicRun": "Every {n} turns; turn {turn} is on its cycle",
+    "periodicSkip": "Every {n} turns; turn {turn} is off its cycle",
+    "periodicUnknown": "Every {n} turns",
+    "conditionRun": "Its condition is currently met",
+    "conditionSkip": "Its condition is currently not met",
+    "conditionUnknown": "Its condition can only be decided at run time",
+    "keyword": "Depends on whether the next message matches its keywords",
+    "onEvent": "Runs when the matching event occurs during the round",
+    "cooldown": "Cooling down; can trigger again from turn {turn}"
+  },
+  "nextKind": {
+    "run": "Will run",
+    "request": "On call",
+    "depends": "Depends",
+    "skip": "Skips",
+    "never": "Never runs"
+  },
+  "run": {
+    "older": "Older round",
+    "newer": "Newer round",
+    "round": "This round",
+    "rewound": "Rewound",
+    "took": "{n} of {total} members took part",
+    "requests": "{n} model requests",
+    "cast": "Who took part",
+    "waiting": "Waiting for earlier members",
+    "skipped": "Skipped",
+    "notYet": "Not started yet",
+    "asked": "Called {names}",
+    "told": "Messaged {names}",
+    "wrote": "Wrote state {n} times",
+    "elapsed": "Elapsed",
+    "events": "Event log ({n})",
+    "openRequests": "View request details",
+    "openLedger": "Open full trajectory",
+    "ledgerHelp": "Inspect requests, tool calls and context one by one.",
+    "jumpFailed": "The trajectory could not be opened.",
+    "retryOne": "Retry one member…",
+    "rerunMembers": "Rerun {n} unfinished members",
+    "rerunHelp": "Rerunning reuses this turn’s original input; members that already finished keep their results.",
+    "rerunThis": "Rerun only this member",
+    "retryBlocked": {
+      "disabled": "The team is off. Turn it on to retry this round.",
+      "config_changed": "The team configuration changed after this round. A retry could only reuse the old configuration, so it is not offered; regenerate the reply instead."
+    },
+    "retryError": {
+      "RP_TEAM_RETRY_CONTEXT_CHANGED": "The chat, world state or team configuration changed after this round, so it can no longer be retried. Regenerate the reply instead.",
+      "RP_TEAM_RETRY_DISABLED": "The team is off. Turn it on, then retry."
+    },
+    "skip": {
+      "dependency_blocked": "Did not run because a member it waits for did not finish",
+      "aborted_by_failure": "The round ended early after another member failed",
+      "preserved": "Kept its earlier result"
+    },
+    "endedBeforeSchedule": "The round ended before it got its turn",
+    "membersUnavailable": "This round's member records could not be read.",
+    "reload": "Reload",
+    "openChatFirst": "Open this chat first, then view its trajectory.",
+    "retryNotAccepted": "The host did not accept this retry request.",
+    "notReached": "Not reached"
+  },
+  "settings": {
+    "basics": "Basics"
+  },
+  "presets": {
+    "current": "Preset of this chat",
+    "saveAs": "Rename or re-version before saving",
+    "replace": "Switch preset",
+    "replaceHelp": "Loading from a file or an example replaces the current draft. It applies to the chat only after saving.",
+    "libraryHelp": "Presets are stored on this device and every version is kept as is. Loading replaces the draft only and never changes the chat directly.",
+    "libraryEmpty": "The library is empty. Save the current draft here or import a file.",
+    "versions": "{n} versions",
+    "differences": "{n} differences",
+    "same": "Same as draft",
+    "exportComponent": "Export some members as a component"
+  },
+  "prompt": {
+    "outline": "Prompt outline",
+    "focus": "Focus mode",
+    "exitFocus": "Exit focus",
+    "params": "Parameters used:",
+    "unknownParam": "Undefined: {id}"
+  },
+  "check": {
+    "usesDraft": "Checks the current draft, including unsaved changes.",
+    "usesSaved": "Checks the saved configuration.",
+    "result": "Check result",
+    "resultTurn": "Check result for turn {n}",
+    "willRun": "{n} of {total} members will run",
+    "problems": "{n} problems",
+    "staleUnknown": "The chat's current source version could not be read, so this check cannot be confirmed as up to date."
+  },
+  "trialNav": {
+    "check": "Check",
+    "trial": "Trial",
+    "checkNote": "No model calls",
+    "trialNote": "Calls real models"
+  },
+  "trialStatus": {
+    "queued": "Queued",
+    "preparing": "Preparing",
+    "running": "Running",
+    "working": "Running",
+    "cancelling": "Stopping",
+    "complete": "Complete",
+    "completed": "Complete",
+    "committed": "Committed",
+    "passed": "Passed",
+    "failed": "Failed",
+    "interrupted": "Interrupted",
+    "cancelled": "Cancelled",
+    "needs_confirmation": "Needs confirmation"
+  },
+  "stateView": {
+    "fields": "{n} fields",
+    "values": "State values",
+    "count": "{n} items",
+    "noCheckpoints": "There are no earlier states to look back at yet."
+  },
+  "colon": ": "
 }

@@ -60,6 +60,14 @@ export function actualTokenUsage(event) {
 
 function projectTraceData(type, data) {
   switch (type) {
+    case 'model.input':
+      return {
+        ...pick(data, ['sessionId', 'turn', 'step', 'requestId', 'provider', 'model', 'purpose', 'localDelivery', 'stepStartSeq']),
+        context: (data.context ?? []).map(item => ({
+          ...pick(item, ['order', 'messageId', 'role', 'kind', 'title', 'source', 'anchor']),
+          content: typeof item.content === 'string' ? item.content : JSON.stringify(item.content)
+        }))
+      }
     case 'budget.request':
       return pick(data, ['sessionId', 'provider', 'model', 'purpose', 'requestId', 'turn', 'step', 'stage', 'invocationId', 'requestCount', 'errorCode', 'cancelled'])
     case 'budget.exceeded':
@@ -78,6 +86,8 @@ function projectTraceData(type, data) {
       return pick(data, ['sourceRunId', 'reason'])
     case 'context.selected':
       return { categories: strings(data.categories) }
+    case 'context.operation':
+      return pick(data, ['operation', 'source'])
     case 'message.sent':
     case 'message.requested':
       return pick(data, ['id', 'sequence', 'from', 'to', 'body', 'depth', 'reason'])

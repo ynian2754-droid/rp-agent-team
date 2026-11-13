@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
-import { normalizeTeamConfig, defaultTeamConfig } from '../src/shared/schema.mjs'
-import { normalizeSuppliedParameterValues, resolveAuthorParameters } from '../src/shared/author-parameters.mjs'
+import { normalizeTeamConfig, defaultTeamConfig, exportPreset, parsePreset } from '../src/shared/schema.mjs'
+import { normalizeSuppliedParameterValues, parameterInsertText, resolveAuthorParameters } from '../src/shared/author-parameters.mjs'
 import { previewParameters } from '../src/host/parameter-api.mjs'
+import { portablePreset } from '../src/host/preset-library.mjs'
 
 test('author parameters resolve defaults, optional agent fields, text tokens, state defaults, and stable hashes', () => {
   const config = defaultTeamConfig()
@@ -84,6 +85,67 @@ test('authority-affecting changes are returned for explicit review and the host 
   assert.equal(preview.config.agents[0].outputAuthority.state, true)
   assert.equal(preview.changes[0].authorityChange, true)
   assert.equal(config.agents[0].outputAuthority.state, false, 'preview does not mutate the author draft')
+})
+
+function insertionConfig() {
+  const config = defaultTeamConfig()
+  const prompt = { kind: 'agent', agentId: 'agent-1', path: '/systemPrompt' }
+  config.agents[0].systemPrompt = 'Style: {{param:style}}\nLength: {{param:length}} words.\n{{param:fix-ups}}End.'
+  config.authorParameters = [
+    { id: 'style', name: 'Style', group: 'Presentation', type: 'choice', default: 'plain', options: [
+      { label: 'Plain', value: 'plain', text: 'Short plain sentences.' },
+      { label: 'Detailed', value: 'detailed', text: 'Dwell on objects and gestures.' }
+    ], bindings: [{ target: prompt, mode: 'text' }] },
+    { id: 'length', name: 'Length', group: 'Presentation', type: 'number', default: 600, valueSchema: { type: 'number', minimum: 100 },
+      bindings: [{ target: prompt, mode: 'text' }] },
+    { id: 'fix-ups', name: 'Allow fix-ups', group: 'Adjudication', type: 'boolean', default: false,
+      textOn: 'Find a plausible condition that lets the user succeed.\n',
+      bindings: [{ target: prompt, mode: 'text' }] }
+  ]
+  return config
+}
+
+test('choices, switches and numbers insert their prompt text like toggled preset entries', () => {
+  const config = insertionConfig()
+  const defaults = resolveAuthorParameters(config, {})
+  assert.equal(defaults.config.agents[0].systemPrompt, 'Style: Short plain sentences.\nLength: 600 words.\nEnd.')
+  const chosen = resolveAuthorParameters(config, { style: 'detailed', length: 1200, 'fix-ups': true })
+  assert.equal(chosen.config.agents[0].systemPrompt,
+    'Style: Dwell on objects and gestures.\nLength: 1200 words.\nFind a plausible condition that lets the user succeed.\nEnd.')
+  assert.deepEqual(chosen.changes.map(change => change.mode), ['text', 'text', 'text'])
+  assert.equal(chosen.config.authorParameters[0].group, 'Presentation')
+  assert.equal(parameterInsertText(chosen.config.authorParameters[2], false), '', 'an omitted textOff inserts nothing')
+
+  const exported = exportPreset(config)
+  assert.equal(exported.dependencies.minimumPluginVersion, '0.7.0')
+  assert.equal(portablePreset(config).dependencies.minimumPluginVersion, '0.7.0')
+  assert.deepEqual(exportPreset(parsePreset(JSON.stringify(exported))), exported, 'groups and inserted texts survive a round trip')
+  assert.equal(exported.config.authorParameters[0].options[1].text, 'Dwell on objects and gestures.')
+  assert.equal(exported.config.authorParameters[2].textOn, 'Find a plausible condition that lets the user succeed.\n')
+  assert.throws(() => resolveAuthorParameters(config, { length: 50 }), { code: 'RP_TEAM_INVALID_PARAMETER_VALUE' })
+})
+
+test('prompt insertion declarations are rejected when they cannot produce text', () => {
+  const variants = [
+    config => { delete config.authorParameters[0].options[1].text },
+    config => { delete config.authorParameters[2].textOn },
+    config => { config.authorParameters[1].textOn = 'only for switches' },
+    config => { config.authorParameters[1].options = [{ label: 'One', value: 1, text: 'x' }] },
+    config => { config.authorParameters[0].options[0].text = 42 },
+    config => { config.authorParameters[0].group = '  ' },
+    config => { config.authorParameters[0].type = 'agent'; config.authorParameters[0].default = 'agent-1'; delete config.authorParameters[0].options }
+  ]
+  for (const [index, change] of variants.entries()) {
+    const config = insertionConfig()
+    change(config)
+    assert.throws(() => normalizeTeamConfig(config), { code: 'RP_TEAM_INVALID_CONFIG' }, `variant ${index}`)
+  }
+  const unbound = insertionConfig()
+  unbound.agents[0].systemPrompt = 'No tokens.'
+  for (const parameter of unbound.authorParameters) parameter.bindings = []
+  delete unbound.authorParameters[2].textOn
+  delete unbound.authorParameters[0].options[0].text
+  assert.doesNotThrow(() => normalizeTeamConfig(unbound), 'texts are only required when a text binding uses them')
 })
 
 function stableJson(value) {

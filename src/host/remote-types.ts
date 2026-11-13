@@ -94,6 +94,8 @@ export interface RunStatusDto {
   productCommitStaged?: boolean
   failure?: string
   retryAvailable: boolean
+  /** Why the host withholds a retry: the team is off, or its effective configuration changed since this round. */
+  retryBlockedReason?: 'disabled' | 'config_changed'
 }
 
 export interface TeamStatusDto {

@@ -7,7 +7,6 @@ import { createCommunication } from '../src/host/communication.mjs'
 import { createScheduler } from '../src/host/scheduler.mjs'
 import { describeStateToolAccess } from '../src/host/state-store.mjs'
 import { actualTokenUsage, createTrace, recordTrace, traceDetail, traceSummary } from '../src/host/trace.mjs'
-import { makeSettingBranch, makeVariableBranch, projectConversationContext } from '../src/host/context-world-adapter.mjs'
 import { registerTeamTools } from '../src/host/team-tools.mjs'
 
 function agent(id, overrides = {}) {
@@ -132,7 +131,6 @@ test('a missing sibling selection does not collapse the surviving path to the le
     character_card: { persona: { name: 'Aster', privateNote: 'not selected' } }
   })
   assert.deepEqual(projected.sources.character_card, { persona: { name: 'Aster' } })
-  assert.deepEqual(projectConversationContext({}, projected).persona, { name: 'Aster' })
 })
 
 test('repeated message selections union authorized rows once and retain mailbox order', () => {
@@ -233,53 +231,11 @@ test('history projection preserves attachments only from selected history entrie
     { type: 'file', attachment: { id: 'hidden-history-file' } }
   ] }]
   const context = buildAgentContext(owner, { recent_history: fullHistory })
-  const projected = projectConversationContext({}, context)
-  assert.deepEqual(projected.history, [{ role: 'user', content: 'See these files', attachments: [
+  assert.deepEqual(context.sources.recent_history, { role: 'user', content: 'See these files', attachments: [
     { type: 'file', attachment: { id: 'authorized-file' } },
     { type: 'file', attachment: { id: 'unselected-file' } }
-  ] }])
-  assert.equal(JSON.stringify(projected.history).includes('hidden-history-file'), false)
-})
-
-test('native tool bridge branches replace root history, frozen library, variable state, and cached resolutions', () => {
-  const permittedLibrary = { groups: [], entries: [
-    { id: 'visible', title: 'Visible', content: 'AUTHORIZED SETTING CANARY' },
-    { id: 'hidden', title: 'Hidden', content: 'ROOT SETTING CANARY' }
-  ] }
-  const settingBridge = {
-    enabled: true,
-    library: permittedLibrary,
-    frozenLibrary: { groups: [], entries: [{ id: 'hidden', title: 'Hidden', content: 'ROOT FROZEN CANARY' }] },
-    history: [{ role: 'user', content: 'ROOT HISTORY CANARY' }],
-    variableState: { privateValue: 'ROOT VARIABLE CANARY' },
-    runtimeResolution: { version: 1, renderedContents: { hidden: 'ROOT RESOLUTION CANARY' } }
-  }
-  const selectedHistory = [{ role: 'user', content: 'AUTHORIZED HISTORY CANARY' }]
-  const settingBranch = makeSettingBranch(
-    agent('reader'), { Visible: 'STAGED SETTING CANARY' }, settingBridge, () => true,
-    selectedHistory, { progress: 'AUTHORIZED VARIABLE CANARY' }, ['/Visible']
-  )
-  const variableBranch = makeVariableBranch(agent('reader'), { progress: 1 }, {
-    enabled: true, config: { initialState: {}, schemaCode: '' }, history: settingBridge.history,
-    state: { privateValue: 'ROOT VARIABLE CANARY' }, runtimeResolution: { version: 1 }
-  }, () => true, selectedHistory, [''])
-  const branches = JSON.stringify({ settingBranch, variableBranch })
-
-  for (const canary of ['ROOT HISTORY CANARY', 'ROOT SETTING CANARY', 'ROOT FROZEN CANARY', 'ROOT VARIABLE CANARY', 'ROOT RESOLUTION CANARY']) {
-    assert.equal(branches.includes(canary), false, `${canary} is removed from the child tool bridge`)
-  }
-  assert.match(branches, /AUTHORIZED HISTORY CANARY/u)
-  assert.match(branches, /STAGED SETTING CANARY/u)
-  assert.match(branches, /AUTHORIZED VARIABLE CANARY/u)
-  assert.deepEqual(settingBranch.frozenLibrary, settingBranch.library)
-  assert.equal(settingBranch.library.entries[0].content, 'STAGED SETTING CANARY')
-  assert.equal(settingBranch.frozenLibrary.entries[0].content, 'STAGED SETTING CANARY')
-  assert.equal(Object.hasOwn(settingBranch, 'runtimeResolution'), false)
-  assert.deepEqual(variableBranch.state, { progress: 1 })
-  assert.equal(settingBranch.writeEnabled, true)
-  assert.deepEqual(settingBranch.writePaths, ['/Visible'])
-  assert.equal(variableBranch.writeEnabled, true)
-  assert.deepEqual(variableBranch.writePaths, [''])
+  ] })
+  assert.equal(JSON.stringify(context.sources.recent_history).includes('hidden-history-file'), false)
 })
 
 test('agents without internal-output authority can read authorized incoming messages but cannot send', async () => {

@@ -27,17 +27,15 @@ test('local delivery returns one assistant body without provider usage or a netw
   ])
   assert.equal(chunks.some(chunk => chunk.type === 'usage'), false)
   assert.equal((await adapter.listModels(TEAM_DELIVERY_PROVIDER)).length, 0)
-  assert.deepEqual(await adapter.resolveModel(TEAM_DELIVERY_PROVIDER, TEAM_DELIVERY_MODEL), {
+  const modelInfo = await adapter.resolveModel(TEAM_DELIVERY_PROVIDER, TEAM_DELIVERY_MODEL)
+  assert.deepEqual(modelInfo, {
     provider: TEAM_DELIVERY_PROVIDER,
     id: TEAM_DELIVERY_MODEL,
-    name: 'RP Team local delivery'
+    name: 'RP Team local delivery',
+    context: { contextWindow: Number.MAX_SAFE_INTEGER }
   })
   const prepared = await adapter.prepareCall(TEAM_DELIVERY_PROVIDER, TEAM_DELIVERY_MODEL)
-  assert.deepEqual(prepared.model, {
-    provider: TEAM_DELIVERY_PROVIDER,
-    id: TEAM_DELIVERY_MODEL,
-    name: 'RP Team local delivery'
-  })
+  assert.deepEqual(prepared.model, modelInfo)
   const preparedChunks = []
   for await (const chunk of prepared.stream(options)) preparedChunks.push(chunk)
   assert.deepEqual(preparedChunks, chunks)

@@ -5,21 +5,29 @@ import { fileURLToPath } from 'node:url'
 
 const WORKER_ENTRY = fileURLToPath(new URL('./trial-worker.mjs', import.meta.url))
 const SAFE_ENV_KEYS = ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'COMSPEC']
+const STDERR_TAIL_LIMIT = 4096
 
 /** Spawn the native runner without inheriting arbitrary parent credentials or profile paths. */
-export function runTrialWorkerProcess({ onProgress, getRunRecords, forkProcess = fork, ...plan }) {
+export function runTrialWorkerProcess(options) {
+  return runWorkerProcess(options)
+}
+
+function runWorkerProcess({ onProgress, getRunRecords, workerCredentials, forkProcess = fork, processCwd, ...plan }) {
+  const workerCwd = processCwd ?? plan.workerRoot ?? process.cwd()
+  mkdirSync(workerCwd, { recursive: true })
+  const stderrTail = createStderrTail(workerCredentials)
   const child = forkProcess(WORKER_ENTRY, [], {
     execPath: process.execPath,
     execArgv: [],
-    cwd: plan.hostRoot,
-    env: workerEnvironment(plan.workerCredentials),
-    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    cwd: workerCwd,
+    env: workerEnvironment(workerCredentials),
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     serialization: 'advanced',
     windowsHide: true,
   })
+  child.stderr?.on('data', chunk => stderrTail.append(chunk))
   const pidMarker = plan.workerRoot && child.pid ? join(plan.workerRoot, '.worker-process.json') : undefined
   if (pidMarker) {
-    mkdirSync(plan.workerRoot, { recursive: true })
     writeFileSync(pidMarker, JSON.stringify({ trialId: plan.trialId, pid: child.pid }), 'utf8')
   }
   const removePidMarker = () => {
@@ -66,7 +74,8 @@ export function runTrialWorkerProcess({ onProgress, getRunRecords, forkProcess =
       removePidMarker()
       if (!settled) {
         settled = true
-        reject(new Error(`The isolated trial worker exited (${signal || code}).`))
+        const diagnostic = stderrTail.text()
+        reject(new Error(`The isolated trial worker exited (${signal || code}).${diagnostic ? `\nWorker stderr:\n${diagnostic}` : ''}`))
       }
       settleCancel()
     })
@@ -111,4 +120,19 @@ function workerEnvironment(credentials = {}) {
 
 function safeError(error) {
   return String(error?.message ?? error).replace(/\bsk-[A-Za-z0-9_-]{16,}\b/gu, '[credential omitted]')
+}
+
+function createStderrTail(credentials) {
+  let value = ''
+  const secrets = Object.values(credentials ?? {}).filter(secret => typeof secret === 'string' && secret.length > 0)
+    .sort((left, right) => right.length - left.length)
+  return {
+    append(chunk) {
+      value = (value + String(chunk)).slice(-STDERR_TAIL_LIMIT)
+    },
+    text() {
+      return secrets.reduce((text, secret) => text.split(secret).join('[credential omitted]'), value)
+        .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/gu, '[credential omitted]').trim()
+    },
+  }
 }

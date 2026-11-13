@@ -123,3 +123,40 @@ const SECTION_BY_FIELD = { parameters: 'identity', context: 'context', statePerm
 export function sectionForField(field) {
   return field.includes('condition-') ? 'trigger' : field.startsWith('handoff-') ? 'communication' : SECTION_BY_FIELD[field] || 'identity'
 }
+
+/**
+ * What differs between the draft and the saved configuration, by the unit an author
+ * thinks in: each member, the team-level settings, and the parameter values.
+ */
+export function draftChanges(state, saved) {
+  const empty = { members: [], removed: [], team: false, params: false, count: 0 }
+  if (!state?.draft || !saved?.config || !state.dirty) return empty
+  const before = new Map(saved.config.agents.map(agent => [agent.id, agent]))
+  const members = []
+  for (const agent of state.draft.agents) {
+    const old = before.get(agent.id)
+    if (!old) members.push({ id: agent.id, name: agent.name, kind: 'added' })
+    else if (stableJson(old) !== stableJson(agent)) members.push({ id: agent.id, name: agent.name, kind: 'changed' })
+  }
+  const removed = saved.config.agents.filter(agent => !state.draft.agents.some(item => item.id === agent.id)).map(agent => agent.name)
+  const order = saved.config.agents.filter(agent => state.draft.agents.some(item => item.id === agent.id)).map(agent => agent.id).join('\u0000')
+    !== state.draft.agents.filter(agent => before.has(agent.id)).map(agent => agent.id).join('\u0000')
+  const rest = config => stableJson({ ...config, agents: undefined, authorParameters: undefined })
+  const team = order || rest(state.draft) !== rest(saved.config)
+  // Parameter definitions and the values chosen for this chat are edited on the same page.
+  const params = stableJson(state.draft.authorParameters || []) !== stableJson(saved.config.authorParameters || [])
+    || stableJson(state.parameterValues || {}) !== stableJson(saved.parameterValues || {})
+  return { members, removed, team, params, count: members.length + removed.length + (team ? 1 : 0) + (params ? 1 : 0) }
+}
+
+const TAB_BY_SECTION = { identity: 'model', trigger: 'trigger', context: 'context', communication: 'links', state: 'access', output: 'access' }
+
+/** The member editor tab that holds a section's controls. */
+export function tabForSection(section) {
+  return TAB_BY_SECTION[section] || 'prompt'
+}
+
+/** Where a team-level invalid field lives: the parameter page or the settings page. */
+export function teamViewForField(field) {
+  return field.startsWith('param') ? 'params' : 'settings'
+}

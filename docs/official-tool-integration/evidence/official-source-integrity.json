@@ -1,0 +1,44 @@
+[
+  {
+    "file": "packages/dsh-product-api/src/index.ts",
+    "archiveSha256": "7583B7781C0C4697A272DFCEC34F9302ACD03C532439D7AA58489DF24ED47890",
+    "checkedSourceSha256": "7583B7781C0C4697A272DFCEC34F9302ACD03C532439D7AA58489DF24ED47890",
+    "unchanged": true
+  },
+  {
+    "file": "packages/dsh-product-api/src/conversationLifecycle.ts",
+    "archiveSha256": "2483D919AEE2F82F7B6A02B36713A07BDC4758C748B4E39793A7FEE7CFB0E0E0",
+    "checkedSourceSha256": "2483D919AEE2F82F7B6A02B36713A07BDC4758C748B4E39793A7FEE7CFB0E0E0",
+    "unchanged": true
+  },
+  {
+    "file": "packages/dsh-product-data/src/index.ts",
+    "archiveSha256": "CE13A16EFB4926582EC72F62E2074BF1289FCEE5F1FE63CCC41C211E541852EE",
+    "checkedSourceSha256": "CE13A16EFB4926582EC72F62E2074BF1289FCEE5F1FE63CCC41C211E541852EE",
+    "unchanged": true
+  },
+  {
+    "file": "packages/dsh-client-roleplay/src/host/session-runtime.mjs",
+    "archiveSha256": "EE5B770E28451CEC828F483A048266315A8731662A5CB9519C67C9CE34705ADF",
+    "checkedSourceSha256": "EE5B770E28451CEC828F483A048266315A8731662A5CB9519C67C9CE34705ADF",
+    "unchanged": true
+  },
+  {
+    "file": "packages/dsh-client-roleplay/src/host/conversation-context.mjs",
+    "archiveSha256": "22600493C6FCB6961E664AD29DAC2510C52C74B8D560F4901CF15C5791455352",
+    "checkedSourceSha256": "22600493C6FCB6961E664AD29DAC2510C52C74B8D560F4901CF15C5791455352",
+    "unchanged": true
+  },
+  {
+    "file": "packages/dsh-client-roleplay/src/host/agent-preset-bridge.mjs",
+    "archiveSha256": "0B34ABC2710CA9EAB1C197B3B81A6FB9AF044C8F8F3074DBEF93844BB4DC8007",
+    "checkedSourceSha256": "0B34ABC2710CA9EAB1C197B3B81A6FB9AF044C8F8F3074DBEF93844BB4DC8007",
+    "unchanged": true
+  },
+  {
+    "file": "pnpm-lock.yaml",
+    "archiveSha256": "9E64D89A6A8742E28C250D37C66A82AD28F5825FBC51C75BD3A45D47CE3673CD",
+    "checkedSourceSha256": "9E64D89A6A8742E28C250D37C66A82AD28F5825FBC51C75BD3A45D47CE3673CD",
+    "unchanged": true
+  }
+]

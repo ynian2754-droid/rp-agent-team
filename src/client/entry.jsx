@@ -8,12 +8,15 @@ import { MessageTraceLink, TeamStatusLine, TeamToggle } from './composer.jsx'
 import { WorkspaceTab } from './workspace.jsx'
 import { createTrajectorySource } from './trajectory-source.js'
 import { RunActions } from './run-actions.jsx'
+import { createTrajectoryNavigation } from './trajectory-navigation.js'
+import { installTrajectory } from './trajectory-view.jsx'
 import { authorViews } from './author-pages.jsx'
 import { typedBuffers } from './typed-field.jsx'
 import rpTeamRemote from '../../lib/typert.remote-client.js'
 
 const LOCALES = __RP_TEAM_LOCALES__
 const CSS_TEXT = __RP_TEAM_CSS__
+const TRAJECTORY_CSS = '__RP_TEAM_TRAJECTORY_CSS__'
 const PACKAGE_ID = '@rp-team/dsh-roleplay-team'
 
 window.__ModuleLoader__.load({
@@ -26,22 +29,34 @@ window.__ModuleLoader__.load({
       if (document.getElementById('rp-agent-team-styles')) return () => {}
       const node = document.createElement('style')
       node.id = 'rp-agent-team-styles'
-      node.textContent = CSS_TEXT
+      node.textContent = CSS_TEXT + TRAJECTORY_CSS
       document.head.appendChild(node)
       return () => node.remove()
     }
 
+    let trajectoryComponents
     function installClient(ctx) {
       services.sidebarRight = ctx.sidebarRight
       services.conversations = ctx.eleckoiConversations
-      services.trajectory = ctx.eleckoiTrajectory
       services.sessionIndex = createSessionConversationIndex(ctx.eleckoiConversations)
+      services.trajectoryNavigation = createTrajectoryNavigation(services.sessionIndex)
       services.api = createClientApi(ctx.remote.rpTeam)
       services.store = createConversationStore(services.api, ctx.eleckoiConversations)
-      ctx.effect(() => ctx.eleckoiTrajectory.registerSource(createTrajectorySource({
-        store: services.store, sessionIndex: services.sessionIndex, conversations: ctx.eleckoiConversations,
-        renderActions: (conversationId, runId) => <RunActions conversationId={conversationId} runId={runId} />,
-      })), 'RP Agent Team main trajectory source')
+      ctx.effect(() => {
+        let active = true
+        let disposeTrajectory
+        const source = createTrajectorySource({
+          store: services.store, sessionIndex: services.sessionIndex, conversations: services.trajectoryNavigation,
+          renderActions: (conversationId, runId) => <RunActions conversationId={conversationId} runId={runId} />,
+        })
+        const navigation = services.trajectoryNavigation
+        // Page chunks are loaded after the client has activated. Waiting for
+        // browser I/O inside apply leaves the plugin in "loading" at boot.
+        void trajectoryComponents.then(components => {
+          if (active) disposeTrajectory = installTrajectory(ctx, components, source, navigation)
+        }).catch(error => console.error('RP Agent Team trajectory could not load', error))
+        return () => { active = false; disposeTrajectory?.() }
+      }, 'RP Agent Team native session trajectory')
       ctx.effect(() => installStyles(), 'RP Agent Team client styles')
       ctx.effect(() => () => {
         services.store.dispose()
@@ -71,6 +86,8 @@ window.__ModuleLoader__.load({
     }
 
     async function apply(ctx) {
+      trajectoryComponents = require('@eleckoi/dsh-client-conversations').loadTrajectoryComponents()
+        .then(components => ({ ...components, conversationRuntime: require('@deepseek-ai/dsh-client-ui-conversation') }))
       const disposeRemote = await ctx.remote.$mount(rpTeamRemote)
       const binding = ctx.inject(['remote.rpTeam'], installClient)
       return async () => {
@@ -79,6 +96,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    return { inject: ['slots', 'remote', 'eleckoiConversations', 'sidebarRight', 'sidebarRightTabs', 'eleckoiTrajectory'], apply }
+    return { inject: ['slots', 'remote', 'eleckoiConversations', 'sidebarRight', 'sidebarRightTabs', 'sessions', 'uiConversation'], apply }
   }
 })

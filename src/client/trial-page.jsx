@@ -1,8 +1,8 @@
 import { React } from './react.js'
-import { services, useKeyed, trialViews, useConversation } from './client-state.js'
-import { t } from './i18n.js'
-import { Field, Check, More, ConfirmButton } from './fields.jsx'
-import { ValueView } from './author-pages.jsx'
+import { services, useKeyed, trialViews, workspaceUi, TRIAL_VIEWS } from './client-state.js'
+import { t, tOr } from './i18n.js'
+import { Field, Check, More, ConfirmButton, Icon, Section, Segmented, StatusTag } from './fields.jsx'
+import { CheckPanel, ValueView } from './author-pages.jsx'
 import { BudgetFields, TASK_BUDGET, TURN_BUDGET } from './resource-settings.jsx'
 import { TypedField } from './typed-field.jsx'
 import { stateChoices, stateKey } from './author-model.js'
@@ -10,21 +10,44 @@ import { resolveAuthorParameters } from '../shared/author-parameters.mjs'
 import { ParameterValue } from './parameter-editor.jsx'
 
 const ACTIVE = new Set(['preparing', 'queued', 'running', 'cancelling', 'working'])
+const STATUS_TONE = { preparing: 'active', queued: 'queued', running: 'active', working: 'active', cancelling: 'active', complete: 'done', completed: 'done', committed: 'done', passed: 'done',
+  failed: 'failed', interrupted: 'failed', cancelled: 'cancelled' }
+const statusLabel = status => tOr(`trialStatus.${status}`, status || '')
 const download = (value, name) => {
   const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' }))
   const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 0)
 }
+const newScenario = () => ({ name: t('trial.new'), steps: [{ id: crypto.randomUUID(), inputText: '', assertions: [] }] })
 
-export function TrialPage({ conversationId, editor, actions }) {
+/** Trying a team out: a free check of who would run, then real runs in an isolated space. */
+export function TrialPage({ conversationId, editor, snapshot, actions }) {
+  const ui = useKeyed(workspaceUi, conversationId)
+  const view = TRIAL_VIEWS.includes(ui.trialView) ? ui.trialView : 'check'
+  const options = [
+    { id: 'check', label: t('trialNav.check'), title: t('author.previewHelp') },
+    { id: 'trial', label: t('trialNav.trial'), title: t('trial.help') }
+  ]
+  return <div className="rp-team-teampage" data-view={view}>
+    <div className="rp-team-subnav">
+      <Segmented className="rp-team-pill" label={t('nav.trial')} value={view} options={options} onChange={next => workspaceUi.update(conversationId, { trialView: next })} />
+      <span className="rp-team-subnav-note">{t(view === 'check' ? 'trialNav.checkNote' : 'trialNav.trialNote')}</span>
+    </div>
+    <div className="rp-team-teampage-body">
+      {view === 'check' ? <CheckPanel conversationId={conversationId} editor={editor} snapshot={snapshot} />
+        : <TrialPanel conversationId={conversationId} editor={editor} snapshot={snapshot} actions={actions} />}
+    </div>
+  </div>
+}
+
+function TrialPanel({ conversationId, editor, snapshot, actions }) {
   const view = useKeyed(trialViews, conversationId)
-  const conversation = useConversation(conversationId)
   const fileRef = React.useRef(null), request = React.useRef(0)
   const update = change => trialViews.update(conversationId, change)
   const scenario = view.scenario, job = view.job
   const busy = Boolean(view.busy), active = ACTIVE.has(job?.status)
   const call = async (method, payload, commit) => {
     update({ busy: method, error: '' })
-    try { const result = await services.api.author(method, payload); update(current => ({ ...current, ...commit?.(result), busy: '' })); return result }
+    try { const result = await services.api.author(method, payload); update(current => ({ ...current, ...commit?.(result, current), busy: '' })); return result }
     catch (error) { update({ busy: '', error: error.message, ...(method === 'startTrial' && error.code?.startsWith('RP_TEAM_') ? { operationId: '', pendingStart: null } : {}) }); return null }
   }
   const refresh = async () => {
@@ -81,82 +104,159 @@ export function TrialPage({ conversationId, editor, actions }) {
     } catch (error) { update({ error: error.message }) }
   }
   const stateOptions = stateChoices(editor.draft.state.definitions)
-  return <div className="rp-team-scroll"><div className="rp-team-page rp-team-author-page">
-    <section className="rp-team-block"><h3>{t('trial.title')}</h3><p className="rp-team-note">{t('trial.help')}</p>
-      <Field label={t('trial.scene')}><select value={scenario.id || ''} onChange={event => { if (!event.target.value) update({ scenario: { name: t('trial.new'), steps: [{ id: crypto.randomUUID(), inputText: '', assertions: [] }] } }); else void call('getTrialScenario', { scenarioId: event.target.value }, result => ({ scenario: result.scenario || result })) }}><option value="">{t('trial.new')}</option>{view.scenarios.map(scene => <option key={scene.id} value={scene.id}>{scene.name}</option>)}</select></Field>
-      <Field label={t('trial.name')}><input value={scenario.name} onChange={event => setScenario(scene => ({ ...scene, name: event.target.value }))} /></Field>
-      {scenario.steps.map((item, index) => <details className="rp-team-author-card" key={item.id || index} open>
-        <summary>{t('turnN', { n: index + 1 })}</summary><div className="rp-team-author-card-body">
-          <Field label={t('trial.input')}><textarea rows={3} value={item.inputText} onChange={event => step(index, { inputText: event.target.value })} /></Field>
-          <AssertionEditor assertions={item.assertions || []} stateOptions={stateOptions} onChange={assertions => step(index, { assertions })} bufferKey={`${conversationId}/trial/${item.id || index}`} onInvalid={(key, invalid) => update(current => ({ ...current, invalid: { ...current.invalid, [key]: invalid } }))} />
-          <button type="button" className="rp-team-quiet" disabled={scenario.steps.length === 1} onClick={() => setScenario(scene => ({ ...scene, steps: scene.steps.filter((_, i) => i !== index) }))}>{t('remove')}</button>
+  const setInvalid = (key, invalid) => update(current => ({ ...current, invalid: { ...current.invalid, [key]: invalid } }))
+  const blockedReason = scenario.steps.some(item => !item.inputText.trim()) ? t('trial.needInput')
+    : Object.values(editor.invalid).some(Boolean) ? t('author.fixDraft')
+      : view.secondPresetId && !view.secondConfig ? t('trial.loadingB') : ''
+  const cannotStart = busy || active || Boolean(view.operationId) || Boolean(blockedReason) || Object.values(view.invalid || {}).some(Boolean)
+  const openTrajectory = (variantId, runId) => void call('getTrialTrajectory', { trialId: job.trialId, variantId, runId, limit: 50 }, result => ({ trajectory: result, trajectoryQuery: { trialId: job.trialId, variantId, runId } }))
+
+  return <div className="rp-team-scroll"><div className="rp-team-page rp-team-trial">
+    <Section title={<><span className="rp-team-step">1</span>{t('trial.scene')}</>}
+      aside={<button type="button" className="rp-team-quiet is-bordered" onClick={() => fileRef.current?.click()}><Icon name="upload" />{t('trial.importScene')}</button>}>
+      <input ref={fileRef} type="file" className="rp-team-file" accept=".json,application/json" onChange={async event => { const file = event.target.files[0]; event.target.value = ''; if (file) { try { await call('importTrialScenario', { export: JSON.parse(await file.text()) }, result => ({ scenario: result.scenario || result })); await refresh() } catch (error) { update({ error: error.message }) } } }} />
+      <div className="rp-team-grid is-name">
+        <Field label={t('trial.pick')}><select value={scenario.id || ''} onChange={event => { if (!event.target.value) update({ scenario: newScenario() }); else void call('getTrialScenario', { scenarioId: event.target.value }, result => ({ scenario: result.scenario || result })) }}><option value="">{t('trial.new')}</option>{view.scenarios.map(scene => <option key={scene.id} value={scene.id}>{scene.name}</option>)}</select></Field>
+        <Field label={t('trial.name')}><input value={scenario.name} onChange={event => setScenario(scene => ({ ...scene, name: event.target.value }))} /></Field>
+      </div>
+      <ol className="rp-team-turns">
+        {scenario.steps.map((item, index) => <li key={item.id || index}>
+          <div className="rp-team-turn-head">
+            <span className="rp-team-turn-no">{t('turnN', { n: index + 1 })}</span>
+            <button type="button" className="rp-team-link" disabled={scenario.steps.length === 1} onClick={() => setScenario(scene => ({ ...scene, steps: scene.steps.filter((_, i) => i !== index) }))}>{t('remove')}</button>
+          </div>
+          <textarea rows={3} aria-label={`${t('turnN', { n: index + 1 })} ${t('trial.input')}`} placeholder={t('trial.input')} value={item.inputText} onChange={event => step(index, { inputText: event.target.value })} />
+          <More summary={`${t('trial.checks')}${item.assertions?.length ? ` · ${item.assertions.length}` : ''}`} startOpen={Boolean(item.assertions?.length)}>
+            <AssertionEditor assertions={item.assertions || []} stateOptions={stateOptions} onChange={assertions => step(index, { assertions })} bufferKey={`${conversationId}/trial/${item.id || index}`} onInvalid={setInvalid} />
+          </More>
+        </li>)}
+      </ol>
+      <div className="rp-team-button-row">
+        <button type="button" className="rp-team-quiet is-bordered" onClick={() => setScenario(scene => ({ ...scene, steps: [...scene.steps, { id: crypto.randomUUID(), inputText: '', assertions: [] }] }))}><Icon name="plus" />{t('trial.addTurn')}</button>
+        <button type="button" className="rp-team-quiet is-bordered" disabled={busy} onClick={() => void call('saveTrialScenario', { scenario }, result => ({ scenario: result.scenario || result })).then(refresh)}>{t('trial.saveScene')}</button>
+      </div>
+      <div className="rp-team-freeze">
+        <button type="button" className="rp-team-quiet is-bordered" disabled={busy} onClick={() => void call('freezeTrialSnapshot', { conversationId }, (result, current) => ({ scenario: { ...current.scenario, snapshotId: result.snapshotId } }))}>{t('trial.freeze')}</button>
+        {scenario.snapshotId ? <StatusTag tone="done">{t('trial.snapshotReady')}</StatusTag> : <span className="rp-team-note">{t('trial.freezeHelp')}</span>}
+      </div>
+      <More summary={t('trial.initial')}><InitialStateEditor scenario={scenario} choices={stateOptions} onChange={initialState => setScenario(scene => ({ ...scene, initialState }))} bufferKey={`${conversationId}/trial-initial`} onInvalid={setInvalid} /></More>
+      <More summary={t('trial.sceneFile')}>
+        <Check label={t('trial.includeSnapshot')} checked={view.includeSnapshot} onChange={includeSnapshot => update({ includeSnapshot })} />
+        <div className="rp-team-button-row">
+          <button type="button" className="rp-team-quiet is-bordered" disabled={busy || !scenario.id} onClick={() => void call('exportTrialScenario', { scenarioId: scenario.id, includeSnapshot: view.includeSnapshot }).then(result => { if (result) download(result.export || result, `${scenario.id}.rp-trial.json`) })}><Icon name="download" />{t('trial.exportScene')}</button>
+          {scenario.id ? <ConfirmButton label={t('trial.deleteScene')} confirmLabel={t('trial.confirmDeleteScene')} disabled={busy} onConfirm={() => void call('deleteTrialScenario', { scenarioId: scenario.id }, () => ({ scenario: newScenario() })).then(refresh)} /> : <span className="rp-team-note">{t('trial.saveFirst')}</span>}
         </div>
-      </details>)}
-      <button type="button" className="rp-team-quiet is-bordered" onClick={() => setScenario(scene => ({ ...scene, steps: [...scene.steps, { id: crypto.randomUUID(), inputText: '', assertions: [] }] }))}>{t('trial.addTurn')}</button>
-      <More summary={t('trial.initial')}><InitialStateEditor scenario={scenario} choices={stateOptions} onChange={initialState => setScenario(scene => ({ ...scene, initialState }))} bufferKey={`${conversationId}/trial-initial`} onInvalid={(key, invalid) => update(current => ({ ...current, invalid: { ...current.invalid, [key]: invalid } }))} /></More>
-      <div className="rp-team-button-row"><button type="button" className="rp-team-quiet is-bordered" disabled={busy} onClick={() => void call('freezeTrialSnapshot', { conversationId }, result => ({ scenario: { ...scenario, snapshotId: result.snapshotId } }))}>{t('trial.freeze')}</button><button type="button" className="rp-team-quiet is-bordered" disabled={busy} onClick={() => void call('saveTrialScenario', { scenario }, result => ({ scenario: result.scenario || result })).then(refresh)}>{t('trial.saveScene')}</button></div>
-      {scenario.snapshotId ? <p className="rp-team-note">{t('trial.snapshotReady')}</p> : null}
-      <More summary={t('presetFiles')}><Check label={t('trial.includeSnapshot')} checked={view.includeSnapshot} onChange={includeSnapshot => update({ includeSnapshot })} /><div className="rp-team-button-row"><button type="button" className="rp-team-quiet" disabled={busy || !scenario.id} onClick={() => void call('exportTrialScenario', { scenarioId: scenario.id, includeSnapshot: view.includeSnapshot }).then(result => { if (result) download(result.export || result, `${scenario.id}.rp-trial.json`) })}>{t('trial.exportScene')}</button><button type="button" className="rp-team-quiet" onClick={() => fileRef.current?.click()}>{t('trial.importScene')}</button>{scenario.id ? <ConfirmButton label={t('trial.deleteScene')} confirmLabel={t('trial.confirmDeleteScene')} disabled={busy} onConfirm={() => void call('deleteTrialScenario', { scenarioId: scenario.id }, () => ({ scenario: { name: t('trial.new'), steps: [{ id: crypto.randomUUID(), inputText: '', assertions: [] }] } })).then(refresh)} /> : null}</div><input ref={fileRef} type="file" className="rp-team-file" accept=".json,application/json" onChange={async event => { const file = event.target.files[0]; event.target.value = ''; if (file) { try { await call('importTrialScenario', { export: JSON.parse(await file.text()) }, result => ({ scenario: result.scenario || result })); await refresh() } catch (error) { update({ error: error.message }) } } }} /></More>
-    </section>
-    <section className="rp-team-block"><h3>{t('trial.variants')}</h3><p className="rp-team-note">{t('trial.scope')}</p><p>{editor.draft.name} · {t('trial.draft')}</p>
-      <Field label={t('trial.second')}><select value={view.secondPresetId} onChange={event => update(current => ({ ...current, secondPresetId: event.target.value, secondConfig: null, secondParameterValues: {}, invalid: Object.fromEntries(Object.entries(current.invalid || {}).filter(([key]) => !key.startsWith('variant-B/'))) }))}><option value="">{t('none')}</option>{view.presets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></Field>
-      {view.secondConfig?.authorParameters?.length ? <fieldset className="rp-team-group"><legend>B · {t('params.title')}</legend>
+      </More>
+    </Section>
+
+    <Section title={<><span className="rp-team-step">2</span>{t('trial.variants')}</>} hint={t('trial.scope')}>
+      <div className="rp-team-variant-pick">
+        <div className="rp-team-variant-slot"><span className="rp-team-variant-letter">A</span><div><strong>{editor.draft.name}</strong><span>{t('trial.draft')}{editor.dirty ? ` · ${t('shell.draft')}` : ''}</span></div></div>
+        <div className="rp-team-variant-slot"><span className="rp-team-variant-letter is-b">B</span>
+          <select aria-label={t('trial.second')} value={view.secondPresetId} onChange={event => update(current => ({ ...current, secondPresetId: event.target.value, secondConfig: null, secondParameterValues: {}, invalid: Object.fromEntries(Object.entries(current.invalid || {}).filter(([key]) => !key.startsWith('variant-B/'))) }))}>
+            <option value="">{t('trial.noSecond')}</option>{view.presets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select>
+        </div>
+      </div>
+      {!view.presets.length ? <p className="rp-team-note">{t('trial.secondHelp')}</p> : null}
+      {view.secondConfig?.authorParameters?.length ? <More summary={`B · ${t('params.title')}`}>
         {view.secondConfig.authorParameters.map(parameter => <Field key={parameter.id} label={parameter.name} hint={parameter.description}>
           <ParameterValue parameter={parameter} value={Object.hasOwn(view.secondParameterValues || {}, parameter.id) ? view.secondParameterValues[parameter.id] : parameter.default}
-            config={view.secondConfig} options={conversation.options} bufferKey={`${conversationId}/variant-B/${view.secondPresetId}/${parameter.id}`}
-            onInvalid={invalid => update(current => ({ ...current, invalid: { ...current.invalid, [`variant-B/${parameter.id}`]: invalid } }))}
+            config={view.secondConfig} options={snapshot.options} bufferKey={`${conversationId}/variant-B/${view.secondPresetId}/${parameter.id}`}
+            onInvalid={invalid => setInvalid(`variant-B/${parameter.id}`, invalid)}
             onChange={value => update(current => ({ ...current, secondParameterValues: { ...current.secondParameterValues, [parameter.id]: value } }))} />
         </Field>)}
-      </fieldset> : null}
-      <BudgetFields title={t('budget.turn')} value={view.turnBudget} defaults={TURN_BUDGET} onChange={turnBudget => update({ turnBudget })} /><BudgetFields title={t('budget.task')} value={view.budget} defaults={TASK_BUDGET} onChange={budget => update({ budget })} />
-      <Check label={t('trial.trust')} hint={t('trial.trustHelp')} checked={view.trusted} onChange={trusted => update({ trusted })} />
-      <p className="rp-team-note">{t('trial.range', { turns: scenario.steps.length, variants: view.secondPresetId ? 2 : 1, calls: view.budget.maxRequests || TASK_BUDGET.maxRequests, seconds: (view.budget.maxElapsedMs || TASK_BUDGET.maxElapsedMs) / 1000 })}</p>
-      <button type="button" className="rp-team-primary" disabled={busy || active || Boolean(view.operationId) || Boolean(view.secondPresetId && !view.secondConfig) || Object.values(editor.invalid).some(Boolean) || Object.values(view.invalid || {}).some(Boolean) || scenario.steps.some(step => !step.inputText.trim())} onClick={() => void start()}>{t('trial.start')}</button>
-      {view.operationId ? <p className="rp-team-callout is-warn">{t('trial.pending')}<button type="button" className="rp-team-link" onClick={() => void call('listTrials', { conversationId }, result => { const found = result.trials.find(trial => trial.operationId === view.operationId); return found ? { selectedId: found.trialId, operationId: '', trials: result.trials } : { trials: result.trials } })}>{t('trial.refresh')}</button><button type="button" className="rp-team-link" disabled={busy} onClick={() => void call('startTrial', view.pendingStart, result => ({ selectedId: result.trialId, job: result.trial || result, operationId: '', pendingStart: null }))}>{t('trial.resubmit')}</button></p> : null}
-    </section>
-    {view.error ? <p className="rp-team-callout is-error" role="alert">{view.error}</p> : null}
-    <section className="rp-team-block"><div className="rp-team-state-section-head"><h3>{t('trial.jobs')}</h3><button type="button" className="rp-team-quiet" onClick={() => void refresh()}>{t('trial.refresh')}</button></div>
-      <Field label={t('trial.jobs')}><select value={view.selectedId} onChange={event => update({ selectedId: event.target.value, trajectory: null })}><option value="">{t('choose')}</option>{view.trials.map(trial => <option key={trial.trialId} value={trial.trialId}>{trial.scenarioName || trial.name || trial.scenario?.name || trial.trialId} · {trial.status}</option>)}</select></Field>
-      {!view.trials.length ? <p className="rp-team-note">{t('trial.noJobs')}</p> : null}
-      {job ? <><p className="rp-team-note">{t('trial.source', { id: job.sourceConversationId || conversationId })}</p><p role="status">{job.status}{job.failure ? ` · ${typeof job.failure === 'string' ? job.failure : job.failure.message}` : ''}</p>{job.usage?.reportedTokensKnown === false ? <p className="rp-team-callout is-warn" role="status">{t('trial.usageUnknown')}</p> : null}<div className="rp-team-button-row">
-        {active ? <button type="button" className="rp-team-quiet is-danger" disabled={busy} onClick={() => void call('cancelTrial', { trialId: job.trialId }, result => ({ job: result.trial || result }))}>{t('trial.stop')}</button> : null}
-        {['interrupted', 'failed', 'cancelled'].includes(job.status) ? <button type="button" className="rp-team-quiet is-bordered" disabled={busy} onClick={() => void call('retryTrial', { trialId: job.trialId, operationId: crypto.randomUUID() }, result => ({ job: result.trial || result }))}>{t('trial.retry')}</button> : null}
-        <button type="button" className="rp-team-quiet is-bordered" disabled={busy} onClick={() => void call('compareTrial', { trialId: job.trialId }, result => ({ comparison: result }))}>{t('trial.compare')}</button>
+      </More> : null}
+      <More summary={t('trial.budgets')}>
+        <BudgetFields title={t('budget.turn')} value={view.turnBudget} defaults={TURN_BUDGET} onChange={turnBudget => update({ turnBudget })} /><BudgetFields title={t('budget.task')} value={view.budget} defaults={TASK_BUDGET} onChange={budget => update({ budget })} />
+        <Check label={t('trial.trust')} hint={t('trial.trustHelp')} checked={view.trusted} onChange={trusted => update({ trusted })} />
+      </More>
+      <div className="rp-team-launch">
+        <button type="button" className="rp-team-primary is-large" disabled={cannotStart} onClick={() => void start()}>{t('trial.start')}</button>
+        <p className="rp-team-note">{blockedReason || t('trial.range', { turns: scenario.steps.length, variants: view.secondPresetId ? 2 : 1, calls: view.budget.maxRequests || TASK_BUDGET.maxRequests, seconds: (view.budget.maxElapsedMs || TASK_BUDGET.maxElapsedMs) / 1000 })}</p>
       </div>
-      {(job.variants || []).map(variant => <details className="rp-team-author-card" key={variant.id} open><summary>{variant.label} · {variant.status || ''}</summary><div className="rp-team-author-card-body">
-        <p className="rp-team-note">{t('trial.adoptHelp')}</p><button type="button" className="rp-team-quiet is-bordered" disabled={!variant.config} onClick={() => { actions.applyConfig(variant.config, '', variant.parameterValues); update({ error: '' }) }}>{t('trial.adopt')}</button>
-        {(variant.turns || []).map((turn, index) => <details key={turn.runId || index} open><summary>{t('turnN', { n: index + 1 })} · {turn.status}</summary><ValueView value={turn.body} /><More summary={t('trial.checks')}><ValueView value={turn.checks || turn.assertions} /></More><More summary={t('trial.details')}><ValueView value={{ state: turn.state, usage: turn.usage, elapsedMs: turn.elapsedMs }} /></More><button type="button" className="rp-team-link" onClick={() => void call('getTrialTrajectory', { trialId: job.trialId, variantId: variant.id, runId: turn.runId, limit: 50 }, result => ({ trajectory: result, trajectoryQuery: { trialId: job.trialId, variantId: variant.id, runId: turn.runId } }))}>{t('trial.trajectory')}</button></details>)}
-        {(variant.attempts || []).filter(attempt => !(variant.turns || []).some(turn => turn.runId === attempt.runId)).map(attempt => <details key={attempt.attemptId} open><summary>{t('turnN', { n: attempt.turn })} · {attempt.status}</summary>
-          <p className="rp-team-note">{attempt.inputText}</p>{attempt.error ? <p className="rp-team-callout is-error">{attempt.error}</p> : null}
-          <p className="rp-team-note">{t('trial.uncommitted')}</p>{attempt.trajectory?.available ? <button type="button" className="rp-team-link" onClick={() => void call('getTrialTrajectory', { trialId: job.trialId, variantId: variant.id, runId: attempt.trajectory.runId, limit: 50 }, result => ({ trajectory: result, trajectoryQuery: { trialId: job.trialId, variantId: variant.id, runId: attempt.trajectory.runId } }))}>{t('trial.trajectory')}</button> : null}
-        </details>)}
-      </div></details>)}<More summary={t('trial.details')}><ValueView value={job} /></More></> : null}
-      {view.comparison ? <section className="rp-team-block"><h3>{t('trial.compare')}</h3>
-        <div className="rp-team-comparison">{view.comparison.variants?.map(variant => <article key={variant.variantId}>
-          <h4>{variant.label}</h4>{variant.turns.map(turn => <section key={turn.turn}>
-            <h5>{t('turnN', { n: turn.turn })} · {turn.status}</h5><ValueView value={turn.body} />
-            <More summary={t('trial.details')}><ValueView value={{ state: turn.state, usage: turn.usage, elapsedMs: turn.elapsedMs, assertions: turn.assertions }} /></More>
+      {view.operationId ? <p className="rp-team-callout is-warn">{t('trial.pending')}<button type="button" className="rp-team-link" onClick={() => void call('listTrials', { conversationId }, result => { const found = result.trials.find(trial => trial.operationId === view.operationId); return found ? { selectedId: found.trialId, operationId: '', trials: result.trials } : { trials: result.trials } })}>{t('trial.refresh')}</button><button type="button" className="rp-team-link" disabled={busy} onClick={() => void call('startTrial', view.pendingStart, result => ({ selectedId: result.trialId, job: result.trial || result, operationId: '', pendingStart: null }))}>{t('trial.resubmit')}</button></p> : null}
+    </Section>
+    {view.error ? <p className="rp-team-callout is-error" role="alert">{view.error}</p> : null}
+
+    <Section title={<><span className="rp-team-step">3</span>{t('trial.jobs')}</>} aside={<button type="button" className="rp-team-quiet" onClick={() => void refresh()}><Icon name="retry" />{t('trial.refresh')}</button>}>
+      {!view.trials.length ? <p className="rp-team-note">{t('trial.noJobs')}</p>
+        : <select aria-label={t('trial.jobs')} value={view.selectedId} onChange={event => update({ selectedId: event.target.value, trajectory: null, comparison: null })}><option value="">{t('trial.pickJob')}</option>{view.trials.map(trial => <option key={trial.trialId} value={trial.trialId}>{trial.scenarioName || trial.name || trial.scenario?.name || trial.trialId} · {statusLabel(trial.status)}</option>)}</select>}
+      {job ? <>
+        <div className="rp-team-job-head">
+          <StatusTag tone={STATUS_TONE[job.status] || 'idle'}>{statusLabel(job.status)}</StatusTag>
+          {job.failure ? <span className="rp-team-cast-error">{typeof job.failure === 'string' ? job.failure : job.failure.message}</span> : null}
+          <span className="rp-team-button-row">
+            {active ? <button type="button" className="rp-team-quiet is-danger is-bordered" disabled={busy} onClick={() => void call('cancelTrial', { trialId: job.trialId }, result => ({ job: result.trial || result }))}><Icon name="stop" />{t('trial.stop')}</button> : null}
+            {['interrupted', 'failed', 'cancelled'].includes(job.status) ? <button type="button" className="rp-team-quiet is-bordered" disabled={busy} onClick={() => void call('retryTrial', { trialId: job.trialId, operationId: crypto.randomUUID() }, result => ({ job: result.trial || result }))}><Icon name="retry" />{t('trial.retry')}</button> : null}
+            <button type="button" className="rp-team-quiet is-bordered" disabled={busy} onClick={() => void call('compareTrial', { trialId: job.trialId }, result => ({ comparison: result }))}>{t('trial.compare')}</button>
+          </span>
+        </div>
+        {job.usage?.reportedTokensKnown === false ? <p className="rp-team-callout is-warn" role="status">{t('trial.usageUnknown')}</p> : null}
+        <div className="rp-team-variants">
+          {(job.variants || []).map((variant, order) => <article className="rp-team-variant" key={variant.id}>
+            <header>
+              <span className={`rp-team-variant-letter ${order ? 'is-b' : ''}`}>{variant.id}</span>
+              <strong>{variant.label}</strong>
+              {variant.status ? <StatusTag tone={STATUS_TONE[variant.status] || 'idle'}>{statusLabel(variant.status)}</StatusTag> : null}
+            </header>
+            {(variant.turns || []).map((turn, index) => <section className="rp-team-variant-turn" key={turn.runId || index}>
+              <h5>{t('turnN', { n: index + 1 })}<StatusTag tone={STATUS_TONE[turn.status] || 'idle'}>{statusLabel(turn.status)}</StatusTag></h5>
+              <ReplyText value={turn.body} />
+              <div className="rp-team-button-row">
+                <button type="button" className="rp-team-link" onClick={() => openTrajectory(variant.id, turn.runId)}>{t('trial.trajectory')}</button>
+              </div>
+              <More summary={t('trial.checks')}><ValueView value={turn.checks || turn.assertions} /></More>
+              <More summary={t('trial.turnDetails')}><ValueView value={{ state: turn.state, usage: turn.usage, elapsedMs: turn.elapsedMs }} /></More>
+            </section>)}
+            {(variant.attempts || []).filter(attempt => !(variant.turns || []).some(turn => turn.runId === attempt.runId)).map(attempt => <section className="rp-team-variant-turn is-attempt" key={attempt.attemptId}>
+              <h5>{t('turnN', { n: attempt.turn })}<StatusTag tone={STATUS_TONE[attempt.status] || 'idle'}>{statusLabel(attempt.status)}</StatusTag></h5>
+              <p className="rp-team-note">{attempt.inputText}</p>{attempt.error ? <p className="rp-team-callout is-error">{attempt.error}</p> : null}
+              <p className="rp-team-note">{t('trial.uncommitted')}</p>{attempt.trajectory?.available ? <button type="button" className="rp-team-link" onClick={() => openTrajectory(variant.id, attempt.trajectory.runId)}>{t('trial.trajectory')}</button> : null}
+            </section>)}
+            <footer>
+              {/* Adopting replaces the draft; with unsaved edits it asks once more, like loading a preset. */}
+              {editor.dirty ? <ConfirmButton className="is-bordered" label={t('trial.adopt')} confirmLabel={t('author.confirmLoad')} disabled={!variant.config}
+                onConfirm={() => { actions.applyConfig(variant.config, '', variant.parameterValues); update({ error: '' }) }} />
+                : <button type="button" className="rp-team-quiet is-bordered" disabled={!variant.config} onClick={() => { actions.applyConfig(variant.config, '', variant.parameterValues); update({ error: '' }) }}>{t('trial.adopt')}</button>}
+              <span className="rp-team-note">{t('trial.adoptHelp')}</span>
+            </footer>
+          </article>)}
+        </div>
+        <p className="rp-team-note">{t('trial.source', { id: job.sourceConversationId || conversationId })}</p>
+        <More summary={t('trial.details')}><ValueView value={job} /></More>
+      </> : null}
+      {view.comparison ? <Section title={t('trial.compare')} className="rp-team-comparison-section">
+        <div className="rp-team-variants">{view.comparison.variants?.map((variant, order) => <article className="rp-team-variant" key={variant.variantId}>
+          <header><span className={`rp-team-variant-letter ${order ? 'is-b' : ''}`}>{variant.variantId}</span><strong>{variant.label}</strong></header>
+          {variant.turns.map(turn => <section className="rp-team-variant-turn" key={turn.turn}>
+            <h5>{t('turnN', { n: turn.turn })}<StatusTag tone={STATUS_TONE[turn.status] || 'idle'}>{statusLabel(turn.status)}</StatusTag></h5><ReplyText value={turn.body} />
+            <More summary={t('trial.turnDetails')}><ValueView value={{ state: turn.state, usage: turn.usage, elapsedMs: turn.elapsedMs, assertions: turn.assertions }} /></More>
           </section>)}
         </article>)}</div>
-      </section> : null}
-    </section>
+      </Section> : null}
+    </Section>
     {view.trajectory?.snapshot || view.trajectory?.native ? <section className="rp-team-trial-trajectory">{services.trajectory.renderSnapshot({ ...view.trajectory, language: navigator.language, loadOlder: async () => { const result = await call('getTrialTrajectory', { ...view.trajectoryQuery, cursor: view.trajectory.cursor, limit: 50 }, result => ({ trajectory: result })); return Boolean(result?.hasMore) } })}</section> : null}
   </div></div>
 }
 
+/** A reply is prose to read and compare, so it gets a reading measure instead of a data tree. */
+function ReplyText({ value }) {
+  if (typeof value !== 'string') return <ValueView value={value} />
+  return <div className="rp-team-reply">{value}</div>
+}
+
 function AssertionEditor({ assertions, stateOptions, onChange, bufferKey, onInvalid }) {
   const edit = (index, patch) => onChange(assertions.map((item, i) => i === index ? { ...item, ...patch } : item))
-  return <fieldset className="rp-team-group"><legend>{t('trial.checks')}</legend>{assertions.map((assertion, index) => <div className="rp-team-author-card-body" key={index}>
+  return <div className="rp-team-assertions">{assertions.map((assertion, index) => <div className="rp-team-assertion" key={index}>
     <Field label={t('trial.checkType')}><select value={assertion.type} onChange={event => edit(index, { type: event.target.value })}>{['body_contains', 'body_not_contains', 'single_output', 'state_equals'].map(type => <option key={type} value={type}>{t(`trial.assertions.${type}`)}</option>)}</select></Field>
     {assertion.type.startsWith('body_') ? <Field label={t('trial.text')}><input value={assertion.text || ''} onChange={event => edit(index, { text: event.target.value })} /></Field> : assertion.type === 'state_equals' ? <><StateChoice value={assertion} choices={stateOptions} onChange={row => edit(index, row)} /><Field label={t('trial.expected')}><TypedField value={assertion.value ?? null} bufferKey={`${bufferKey}/assertion/${index}`} onChange={value => edit(index, { value })} onInvalid={invalid => onInvalid(`${bufferKey}/assertion/${index}`, invalid)} /></Field></> : null}
-    <button type="button" className="rp-team-quiet" onClick={() => { onChange(assertions.filter((_, i) => i !== index)); onInvalid(`${bufferKey}/assertion/${index}`, false) }}>{t('remove')}</button>
-  </div>)}<button type="button" className="rp-team-quiet" onClick={() => onChange([...assertions, { type: 'single_output' }])}>{t('trial.addCheck')}</button></fieldset>
+    <button type="button" className="rp-team-link" onClick={() => { onChange(assertions.filter((_, i) => i !== index)); onInvalid(`${bufferKey}/assertion/${index}`, false) }}>{t('remove')}</button>
+  </div>)}<button type="button" className="rp-team-quiet is-bordered" onClick={() => onChange([...assertions, { type: 'single_output' }])}><Icon name="plus" />{t('trial.addCheck')}</button></div>
 }
 function StateChoice({ choices, value, onChange }) {
   return <Field label={t('memory.location')}><select value={stateKey(value)} onChange={event => { const row = choices.find(row => stateKey(row) === event.target.value); if (row) onChange({ namespace: row.namespace, path: row.path }) }}><option value="">{t('choose')}</option>{choices.map(row => <option key={stateKey(row)} value={stateKey(row)}>{row.label}</option>)}</select></Field>
 }
 function InitialStateEditor({ scenario, choices, onChange, bufferKey, onInvalid }) {
   const rows = scenario.initialState || []
-  return <>{rows.map((row, index) => <div className="rp-team-author-card-body" key={index}><StateChoice choices={choices} value={row} onChange={patch => onChange(rows.map((item, i) => i === index ? { ...item, ...patch } : item))} /><TypedField value={row.value} bufferKey={`${bufferKey}/${index}`} onInvalid={invalid => onInvalid(`${bufferKey}/${index}`, invalid)} onChange={value => onChange(rows.map((item, i) => i === index ? { ...item, value } : item))} /><button type="button" className="rp-team-quiet" onClick={() => { onChange(rows.filter((_, i) => i !== index)); onInvalid(`${bufferKey}/${index}`, false) }}>{t('remove')}</button></div>)}<button type="button" className="rp-team-quiet" disabled={!choices.length} onClick={() => onChange([...rows, { namespace: choices[0].namespace, path: choices[0].path, value: null }])}>{t('author.addPath')}</button></>
+  return <div className="rp-team-assertions">{rows.map((row, index) => <div className="rp-team-assertion" key={index}><StateChoice choices={choices} value={row} onChange={patch => onChange(rows.map((item, i) => i === index ? { ...item, ...patch } : item))} /><TypedField value={row.value} bufferKey={`${bufferKey}/${index}`} onInvalid={invalid => onInvalid(`${bufferKey}/${index}`, invalid)} onChange={value => onChange(rows.map((item, i) => i === index ? { ...item, value } : item))} /><button type="button" className="rp-team-link" onClick={() => { onChange(rows.filter((_, i) => i !== index)); onInvalid(`${bufferKey}/${index}`, false) }}>{t('remove')}</button></div>)}<button type="button" className="rp-team-quiet is-bordered" disabled={!choices.length} onClick={() => onChange([...rows, { namespace: choices[0].namespace, path: choices[0].path, value: null }])}><Icon name="plus" />{t('author.addPath')}</button></div>
 }
-

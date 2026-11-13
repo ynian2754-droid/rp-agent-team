@@ -65,6 +65,7 @@ export function persistedRunValue(run) {
     productMessageId: run.productMessageId,
     productCommitStaged: run.productCommitStaged === true,
     productReceiptOutcome: run.productReceiptOutcome,
+    ...(run.productStageRejected !== undefined ? { productStageRejected: run.productStageRejected } : {}),
     retrySourceRunId: run.retrySourceRunId,
     childSessionIds: [...(run.childSessionIds ?? [])],
     drafts: run.drafts ?? [],
@@ -96,11 +97,13 @@ export function applySavedRunFields(run, row) {
   run.drafts = structuredClone(row.drafts ?? [])
   run.messages = structuredClone(row.messages ?? [])
   run.internalResults = structuredClone(row.internalResults ?? [])
-  run.trace = row.trace ?? createTrace(run.runId, run.startedAt)
-  run.publication = row.publication ?? row.status?.publication ?? null
+  // Cloned: rows may come from a shared cache, and a hydrated run records into its own trace.
+  run.trace = row.trace ? structuredClone(row.trace) : createTrace(run.runId, run.startedAt)
+  run.publication = structuredClone(row.publication ?? row.status?.publication ?? null)
   run.productMessageId = row.productMessageId ?? row.status?.productMessageId
   run.productCommitStaged = row.productCommitStaged === true
   run.productReceiptOutcome = row.productReceiptOutcome
+  if (row.productStageRejected !== undefined) run.productStageRejected = row.productStageRejected
   run.retrySourceRunId = row.retrySourceRunId
   run.childSessionIds = [...(row.childSessionIds ?? run.childSessionIds ?? [])]
   run.inputMessageId = row.inputMessageId ?? row.status?.inputMessageId

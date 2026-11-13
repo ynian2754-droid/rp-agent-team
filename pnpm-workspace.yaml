@@ -2,7 +2,7 @@ packages:
   - .
 
 patchedDependencies:
-  '@deepseek-ai/dsh-typert-generator@0.2.0-rc.2': patches/@deepseek-ai__dsh-typert-generator@0.2.0-rc.2.patch
+  '@deepseek-ai/dsh-typert-generator@0.2.2-rc.1': patches/@deepseek-ai__dsh-typert-generator@0.2.2-rc.1.patch
 
 allowBuilds:
   esbuild: true

@@ -15,3 +15,6 @@ export function updateCapabilitySelection(memberCapabilities, availableCapabilit
   current.set(id, { ...(current.get(id) || {}), id, enabled })
   return [...current.values()]
 }
+export function isProductDataCapability(id) {
+  return ['builtin:setting-library', 'builtin:variables', 'builtin:roleplay-workflow'].includes(id)
+}

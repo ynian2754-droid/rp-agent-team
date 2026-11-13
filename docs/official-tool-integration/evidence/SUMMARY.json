@@ -1,0 +1,142 @@
+{
+  "hostCommit": "d4b6bb949771693cd357ddd535ead22f4e835774",
+  "dshCommit": "c1b47e41fcd54d20a0f061df28683bfc29ee24e5",
+  "nativeRequests": 72,
+  "lifecycleRegistrationEvidence": "sample-source-does-not-reference-lifecycle-service",
+  "scenarios": [
+    {
+      "name": "two-member-tools-publication-roster-private-state",
+      "passed": true,
+      "members": [
+        "321530b0-4b87-457e-b765-5ada2f93663b",
+        "8936bf6a-6a01-4ef1-b6b3-715933da837f"
+      ]
+    },
+    {
+      "name": "resumed-member-reapplies-scope-without-changing-closed-run",
+      "passed": true
+    },
+    {
+      "name": "multi-turn-delete-regenerate-private-state-follows-active-output-identities",
+      "passed": true
+    },
+    {
+      "name": "nested-native-agent-inherits-actor-scope",
+      "passed": true
+    },
+    {
+      "name": "during-generation-variable-write",
+      "actual": "database-write-succeeds-product-save-conflicts",
+      "productError": "生成期间聊天变量已被其他操作修改，未覆盖当前变量。"
+    },
+    {
+      "name": "after-save-variable-write",
+      "actual": "current-database-changes-existing-floor-does-not-delete-restores-1",
+      "beforeHistory": {
+        "current": {
+          "rawJson": "{\n  \"score\": 1,\n  \"hidden\": \"HIDDEN_WORLD_SECRET\"\n}",
+          "root": {
+            "score": 1,
+            "hidden": "HIDDEN_WORLD_SECRET"
+          },
+          "errorMessage": "",
+          "topLevelCount": 2,
+          "valueCount": 2
+        },
+        "floors": [
+          {
+            "id": "dsh-32",
+            "label": "第 1 楼",
+            "messagePreview": "<FINAL>OFFICIAL_TOOL_TEAM_BODY</FINAL>……",
+            "createdAt": "2026-10-07T07:45:09.67Z",
+            "state": {
+              "rawJson": "{\n  \"score\": 1,\n  \"hidden\": \"HIDDEN_WORLD_SECRET\"\n}",
+              "root": {
+                "score": 1,
+                "hidden": "HIDDEN_WORLD_SECRET"
+              },
+              "errorMessage": "",
+              "topLevelCount": 2,
+              "valueCount": 2
+            },
+            "changedValueCount": 0,
+            "changedPaths": []
+          }
+        ]
+      },
+      "afterHistory": {
+        "current": {
+          "rawJson": "{\n  \"score\": 9,\n  \"hidden\": \"HIDDEN_WORLD_SECRET\"\n}",
+          "root": {
+            "score": 9,
+            "hidden": "HIDDEN_WORLD_SECRET"
+          },
+          "errorMessage": "",
+          "topLevelCount": 2,
+          "valueCount": 2
+        },
+        "floors": [
+          {
+            "id": "dsh-32",
+            "label": "第 1 楼",
+            "messagePreview": "<FINAL>OFFICIAL_TOOL_TEAM_BODY</FINAL>……",
+            "createdAt": "2026-10-07T07:45:09.67Z",
+            "state": {
+              "rawJson": "{\n  \"score\": 1,\n  \"hidden\": \"HIDDEN_WORLD_SECRET\"\n}",
+              "root": {
+                "score": 1,
+                "hidden": "HIDDEN_WORLD_SECRET"
+              },
+              "errorMessage": "",
+              "topLevelCount": 2,
+              "valueCount": 2
+            },
+            "changedValueCount": 0,
+            "changedPaths": []
+          }
+        ]
+      },
+      "restoredScore": 1
+    },
+    {
+      "name": "member-failure-discards-private-state",
+      "passed": true
+    },
+    {
+      "name": "cancel-drains-children-and-discards-private-state",
+      "passed": true
+    },
+    {
+      "name": "disable-uninstall-reinstall-preserves-native-session-and-private-state",
+      "passed": true,
+      "liveRootToolReleaseChecked": true
+    }
+  ],
+  "independentProcessReopen": [
+    {
+      "name": "independent-process-reopen",
+      "passed": true,
+      "privateState": {
+        "remembered": "PUBLIC_MEMORY",
+        "expressed": true
+      }
+    }
+  ],
+  "loadedSourceHashes": {
+    "index.mjs": "061aed8de0a5f86cd398f211f023cebb92f372a5bd528006573760a5494bcfe0",
+    "runtime.mjs": "ef3bab1abe7be4ff1e0d48bc96b085811ffac768c24b36d7be801833e5d15a02",
+    "journal.mjs": "54b46c3ac2365787b472b23f291e8cd1cba0a90d29da76b1a088efe51abab495"
+  },
+  "bundleSha256": "6E5269C51E440979C48B21190BBD04B90F58237F465E693486050799380DD06B",
+  "finalData": "output/official-host-tools-20261007/data-final-04",
+  "paidModelCalls": 0,
+  "scope": "two-member-public-api-tool-proof-not-full-v040-migration",
+  "nativeUiVerified": {
+    "electronDesktop": false,
+    "memberNavigation": true,
+    "nativeMemberTrajectory": true,
+    "profile": "official DSH agent team, ElecKoi shell disabled only in test profile",
+    "finalInstalledPackage": true,
+    "rosterAndTaskBoard": true
+  }
+}

@@ -23,7 +23,12 @@ export function removeAgent(config, id) {
     ...agent,
     execution: { ...agent.execution, after: agent.execution.after.filter(target => target !== id) },
     communication: Object.fromEntries(Object.entries(agent.communication).map(([key, ids]) => [key, ids.filter(target => key === 'handoffs' ? target.to !== id : target !== id)])),
-    triggers: agent.triggers.filter(trigger => !referencesNamespace(trigger, `private:${id}`)).map(trigger => trigger.from ? { ...trigger, from: trigger.from.filter(target => target !== id) } : trigger),
+    triggers: agent.triggers.filter(trigger => !referencesNamespace(trigger, `private:${id}`)).flatMap(trigger => {
+      if (!trigger.from?.length) return [trigger]
+      const from = trigger.from.filter(target => target !== id)
+      // The host reads an empty `from` as "any member": removing the only allowed sender drops the trigger instead of widening it.
+      return from.length ? [{ ...trigger, from }] : []
+    }),
     context: { ...agent.context, sources: agent.context.sources.map(source => source.agentIds ? { ...source, agentIds: source.agentIds.filter(target => target !== id) } : source) },
     statePermissions: agent.statePermissions.filter(rule => rule.namespace !== `private:${id}`)
   }))

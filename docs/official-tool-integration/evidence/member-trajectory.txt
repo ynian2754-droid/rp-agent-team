@@ -1,0 +1,144 @@
+Browser tab: 1, Title: "Read permitted observations, communicate — DeepSeek Harness", URL: "http://127.0.0.1:58473/".
+1 AXWebArea Read permitted observations, communicate — DeepSeek Harness, URL: 127.0.0.1:58473/
+	2 container
+		3 button 新建会话
+		4 button 收起侧边栏
+		5 button 新建会话
+		6 container 全局面板
+			7 button 插件
+		8 text 工作区
+		9 container
+			10 button (collapsed) Description: 搜索会话, Secondary Actions: Expand
+			11 text field (settable)
+		12 button 视图选项
+		13 button 添加工作区
+		14 outline 会话
+			15 container
+				16 row (expanded) 未分组, Secondary Actions: Collapse
+					17 text 未分组
+				18 row (selectable) PROBE_CANCEL 5分钟
+					19 text PROBE_CANCEL
+					20 text 5分钟
+				21 row (selectable) PROBE_FAIL 5分钟
+					22 text PROBE_FAIL
+					23 text 5分钟
+				24 row (selectable) 未命名 5分钟
+					25 text 未命名
+					26 text 5分钟
+				27 row (selectable) PROBE_WRITE_DURING 5分钟
+					28 text PROBE_WRITE_DURING
+					29 text 5分钟
+				30 row (selectable) PROBE_NESTED 5分钟
+					31 text PROBE_NESTED
+					32 text 5分钟
+				33 row (selectable) 未命名 5分钟
+					34 text 未命名
+					35 text 5分钟
+				36 button (expanded) 收起, Secondary Actions: Collapse
+		37 pop up button (collapsed) Description: 设置, Secondary Actions: Expand
+		38 container
+			39 container 会话层级
+				40 button workspace
+				41 text /
+				42 pop up button (collapsed) Description: 切换子智能体：Restricted observer, Secondary Actions: Expand
+			43 pop up button (collapsed) Description: 智能体团队, Secondary Actions: Expand
+			44 text 默认 Agent 预设
+			45 button 用 文件资源管理器 打开
+			46 pop up button (collapsed) Description: 更多打开方式, Secondary Actions: Expand
+			47 pop up button (collapsed) Description: 更多操作, Secondary Actions: Expand
+			48 button 打开右侧边栏
+			49 tab group
+				50 tab (selectable, settable, boolean) 对话, Value: 0
+				51 tab (selected, settable, boolean) 轨迹, Value: 1
+		52 container
+			53 toolbar 轨迹工具栏
+				54 checkbox Description: 使用实际时长, Value: 0
+				55 checkbox Description: 收起所有轮次, Value: 0
+				56 checkbox Description: 收起所有调用, Value: 0
+				57 search text field (settable) 搜索轨迹
+			58 container 轨迹时间线
+				59 container 时间线概览；水平拖动可聚焦事件
+			60 table
+				61 row 系统，初始系统提示词
+					62 cell
+						63 text 系统
+					64 cell
+						65 text 初始系统提示词
+				66 row 用户，Read permitted observations, communicate them, then submit. Do not inspect unrelated files. Member ID: observer Read your scoped rp_tool_read. Submit with rp_tool_submit. Do not publish to the user.
+					67 cell
+						68 container 第 1 轮
+						69 text 用户
+					70 cell
+						71 text Read permitted observations, communicate them, then submit. Do not inspect unrelated files. Member ID: observer Read your scoped rp_tool_read. Submit with rp_tool_submit. Do not publish to the user.
+				72 row 上下文，Current runtime context. This snapshot supersedes earlier runtime-context snapshots. Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: "C:\Users\O4\Desktop\agent rp team\output\official-host-tools-20261007\data-final-04\workspace". Some platform temporary areas may also be writable. Approval prompts are disabled in this session: actions that require approval are rejected automatically — do not request sandbox esca…
+					73 cell
+						74 text 上下文
+					75 cell
+						76 text Current runtime context. This snapshot supersedes earlier runtime-context snapshots. Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: "C:\Users\O4\Desktop\agent rp team\output\official-host-tools-20261007\data-final-04\workspace". Some platform temporary areas may also be writable. Approval prompts are disabled in this session: actions that require approval are rejected automatically — do not request sandbox esca…
+				77 row 请求 1，助手，（仅工具调用）
+					78 cell
+						79 checkbox Description: 请求 #1, Value: 0
+							80 text 请求 #1
+						81 text 助手
+					82 cell
+						83 text （仅工具调用）
+				84 row 工具，rp_tool_read {}
+					85 cell
+						86 text 工具
+					87 cell
+						88 container rp_tool_read {} → {"input":"PROBE_SUCCESS","character":{"/assistant_name":"Synthetic tool team"},"variables":{"/score":1},"settings":[{"id":"public-setting","title":"public-setting","iconId":"","kind":"normal","groupId":"","content":"PUBLIC_SETTING_BODY","openingMessages":[],"defaultOpeningMessageId":"","agentSelectionHint":"","agentReadStrategy":"required","dynamicMode":"standard","contentMode":"plain_text","keywords":[],"keywordScanDepth":2,"conditionKeywords":[],"keywordCondition":"none","keywordUseRegex":false,"keywordIg…
+							89 text rp_tool_read {} → {"input":"PROBE_SUCCESS","character":{"/assistant_name":"Synthetic tool team"},"variables":{"/score":1},"settings":[{"id":"public-setting","title":"public-setting","iconId":"","kind":"normal","groupId":"","content":"PUBLIC_SETTING_BODY","openingMessages":[],"defaultOpeningMessageId":"","agentSelectionHint":"","agentReadStrategy":"required","dynamicMode":"standard","contentMode":"plain_text","keywords":[],"keywordScanDepth":2,"conditionKeywords":[],"keywordCondition":"none","keywordUseRegex":false,"keywordIg…
+				90 row 请求 2，助手，（仅工具调用）
+					91 cell
+						92 checkbox Description: 请求 #2, Value: 0
+							93 text 请求 #2
+						94 text 助手
+					95 cell
+						96 text （仅工具调用）
+				97 row 工具，eleckoi_glob_variables {"pattern":"**"}
+					98 cell
+						99 text 工具
+					100 cell
+						101 container eleckoi_glob_variables {"pattern":"**"} → error
+							102 text eleckoi_glob_variables {"pattern":"**"} → error
+				103 row 请求 3，助手，（仅工具调用）
+					104 cell
+						105 checkbox Description: 请求 #3, Value: 0
+							106 text 请求 #3
+						107 text 助手
+					108 cell
+						109 text （仅工具调用）
+				110 row 工具，rp_tool_send {"to":"actor","body":"SCOPED_OBSERVATION: the user sounded brief."}
+					111 cell
+						112 text 工具
+					113 cell
+						114 container rp_tool_send {"to":"actor","body":"SCOPED_OBSERVATION: the user sounded brief."} → {"messageId":"team-message-c8549edc-2a46-49c4-87c7-e295ff9c66b5","status":"accepted"}
+							115 text rp_tool_send {"to":"actor","body":"SCOPED_OBSERVATION: the user sounded brief."} → {"messageId":"team-message-c8549edc-2a46-49c4-87c7-e295ff9c66b5","status":"accepted"}
+				116 row 请求 4，助手，（仅工具调用）
+					117 cell
+						118 checkbox Description: 请求 #4, Value: 0
+							119 text 请求 #4
+						120 text 助手
+					121 cell
+						122 text （仅工具调用）
+				123 row 工具，rp_tool_submit {"summary":"SCOPED_OBSERVATION","privateDelta":{"remembered":"PUBLIC_MEMORY"},"productDelta":{"score":2}}
+					124 cell
+						125 text 工具
+					126 cell
+						127 container rp_tool_submit {"summary":"SCOPED_OBSERVATION","privateDelta":{"remembered":"PUBLIC_MEMORY"},"productDelta":{"score":2}} → {"accepted":true,"memberId":"observer"}
+							128 text rp_tool_submit {"summary":"SCOPED_OBSERVATION","privateDelta":{"remembered":"PUBLIC_MEMORY"},"productDelta":{"score":2}} → {"accepted":true,"memberId":"observer"}
+				129 row 请求 5，助手，Internal member work complete.
+					130 cell
+						131 checkbox Description: 请求 #5, Value: 0
+							132 text 请求 #5
+						133 text 助手
+					134 cell
+						135 text Internal member work complete.
+			136 container
+				137 text entry area (settable) 发消息或创建任务, / 调用指令, @ 文件或对话
+				138 pop up button (collapsed) Description: 添加文件或调用指令, Secondary Actions: Expand
+				139 button 访问模式，当前：Eleckoi Workspace
+				140 button (disabled) 发送消息
+			141 pop up button (collapsed) Description: 1 轮 5 步, Secondary Actions: Expand
+
+The focused UI element is 51 tab (selected, settable, boolean) 轨迹, Value: 1

@@ -1,0 +1,133 @@
+{
+  "trialId": "trial-0914f691-6a33-48d8-aa10-46332fffc496",
+  "sourceConversationId": "21754bc5-e5ca-445b-a612-c07a50f8749d",
+  "status": "complete",
+  "variants": [
+    {
+      "id": "candidate-a",
+      "turns": [
+        {
+          "runId": "2004a4cf-6902-4a7c-b5cb-783366c6f511",
+          "body": "TRIAL_NATIVE_PUBLICATION_1",
+          "state": {
+            "count": 1
+          },
+          "status": "complete",
+          "usage": {
+            "requests": 3,
+            "reportedTokens": 96,
+            "elapsedMs": 451
+          }
+        },
+        {
+          "runId": "51b231b6-bd36-412e-91f2-daae00f60958",
+          "body": "TRIAL_NATIVE_PUBLICATION_2",
+          "state": {
+            "count": 2
+          },
+          "status": "complete",
+          "usage": {
+            "requests": 3,
+            "reportedTokens": 96,
+            "elapsedMs": 291
+          }
+        }
+      ]
+    },
+    {
+      "id": "candidate-b",
+      "turns": [
+        {
+          "runId": "9f7ab11d-7130-4410-8262-0584ea58f593",
+          "body": "TRIAL_NATIVE_PUBLICATION_1",
+          "state": {
+            "count": 1
+          },
+          "status": "complete",
+          "usage": {
+            "requests": 3,
+            "reportedTokens": 96,
+            "elapsedMs": 220
+          }
+        },
+        {
+          "runId": "1e457252-73b8-43b7-a09f-ca96b60a2832",
+          "body": "TRIAL_NATIVE_PUBLICATION_2",
+          "state": {
+            "count": 2
+          },
+          "status": "complete",
+          "usage": {
+            "requests": 3,
+            "reportedTokens": 96,
+            "elapsedMs": 283
+          }
+        }
+      ]
+    }
+  ],
+  "nativeModelRequests": [
+    {
+      "turn": 1,
+      "tool": "rp_team_state_version",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 1,
+      "tool": "rp_team_write_state",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 1,
+      "tool": "rp_team_publish",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 2,
+      "tool": "rp_team_state_version",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 2,
+      "tool": "rp_team_write_state",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 2,
+      "tool": "rp_team_publish",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 1,
+      "tool": "rp_team_state_version",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 1,
+      "tool": "rp_team_write_state",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 1,
+      "tool": "rp_team_publish",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 2,
+      "tool": "rp_team_state_version",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 2,
+      "tool": "rp_team_write_state",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 2,
+      "tool": "rp_team_publish",
+      "model": "rp-team-fixture"
+    }
+  ],
+  "mode": "full",
+  "sourceConversationUnchanged": true
+}

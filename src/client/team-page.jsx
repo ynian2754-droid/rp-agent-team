@@ -1,46 +1,74 @@
 import { React } from './react.js'
 import { t } from './i18n.js'
-import { examplePresets } from '../shared/schema.mjs'
-import { authoringExamples } from '../shared/author-examples.mjs'
-import { drafts } from './client-state.js'
+import { drafts, workspaceUi, TEAM_VIEWS, useKeyed } from './client-state.js'
 import { selectPublisher } from './editor-model.js'
-import { editConfig } from './draft-state.js'
-import { Field, More } from './fields.jsx'
+import { editConfig, invalidEntries, teamViewForField } from './draft-state.js'
+import { Field, More, Segmented } from './fields.jsx'
 import { TypedField } from './typed-field.jsx'
 import { StateDefinitions } from './state-definitions.jsx'
 import { ParametersEditor } from './parameter-editor.jsx'
 import { BudgetFields, MemoryDefinitions } from './resource-settings.jsx'
-import { useConversation } from './client-state.js'
+import { MembersPage } from './members.jsx'
 
 const LIMITS = { concurrency: 4, maxActivations: 32, maxPerAgent: 3, maxDepth: 4 }
 
-export function TeamPage({ conversationId, editor, actions }) {
+/** The team being edited: its members, the values an ordinary user adjusts, and the author's settings. */
+export function TeamPage({ conversationId, editor, snapshot, changes }) {
+  const ui = useKeyed(workspaceUi, conversationId)
+  const view = TEAM_VIEWS.includes(ui.teamView) ? ui.teamView : 'members'
   const config = editor.draft
-  const snapshot = useConversation(conversationId)
-  const examples = [...examplePresets(), ...authoringExamples()]
-  const fileRef = React.useRef(null)
-  const [pending, setPending] = React.useState(null)
+  const invalidTeam = invalidEntries(editor).filter(entry => entry.scope === '$team')
+  const mark = (name, dirty) => invalidTeam.some(entry => teamViewForField(entry.field) === name) ? { mark: 'failed', markLabel: t('shell.needsFix') }
+    : dirty ? { mark: 'dirty', markLabel: t('shell.draft') } : {}
+  const options = [
+    { id: 'members', label: t('teamNav.members'), count: config.agents.length, ...(changes.members.length || changes.removed.length ? { mark: 'dirty', markLabel: t('shell.draft') } : {}) },
+    { id: 'params', label: t('teamNav.params'), count: (config.authorParameters || []).length, ...mark('params', changes.params) },
+    { id: 'settings', label: t('teamNav.settings'), ...mark('settings', changes.team) }
+  ]
+  const drilled = view === 'members' && editor.view === 'member'
+  return <div className="rp-team-teampage" data-view={view} data-drilled={drilled ? 'true' : undefined}>
+    <div className="rp-team-subnav">
+      <Segmented className="rp-team-pill" label={t('teamNav.label')} value={view} options={options} onChange={next => workspaceUi.update(conversationId, { teamView: next })} />
+    </div>
+    <div className="rp-team-teampage-body">
+      {view === 'members' ? <MembersPage conversationId={conversationId} editor={editor} snapshot={snapshot} changes={changes} />
+        : view === 'params' ? <div className="rp-team-scroll"><div className="rp-team-page"><ParametersEditor conversationId={conversationId} editor={editor} options={snapshot.options} /></div></div>
+          : <SettingsPage conversationId={conversationId} editor={editor} />}
+    </div>
+  </div>
+}
+
+function SettingsPage({ conversationId, editor }) {
+  const config = editor.draft
   const update = change => drafts.update(conversationId, change)
   const setConfig = change => update(state => editConfig(state, change(state.draft)))
-  // Replacing an edited draft asks first; an unedited draft can always be restored from the saved copy.
-  const offer = (config, notice) => editor.dirty ? setPending({ config, notice }) : actions.applyConfig(config, notice)
-
   return <div className="rp-team-scroll">
     <div className="rp-team-page">
-      <ParametersEditor conversationId={conversationId} editor={editor} options={snapshot.options} />
       <section className="rp-team-block">
-        <h3>{t('presetInfo')}</h3>
-        <Field label={t('presetName')} hint={t('stableIdHint', { id: config.id })}>
-          <input value={config.name} onChange={event => setConfig(draft => ({ ...draft, name: event.target.value }))} />
-        </Field>
-        <Field label={t('presetVersion')}>
-          <input value={config.version} onChange={event => setConfig(draft => ({ ...draft, version: event.target.value }))} />
-        </Field>
+        <h3>{t('settings.basics')}</h3>
+        <div className="rp-team-grid is-name">
+          <Field label={t('presetName')} hint={t('stableIdHint', { id: config.id })}>
+            <input value={config.name} onChange={event => setConfig(draft => ({ ...draft, name: event.target.value }))} />
+          </Field>
+          <Field label={t('presetVersion')}>
+            <input value={config.version} onChange={event => setConfig(draft => ({ ...draft, version: event.target.value }))} />
+          </Field>
+        </div>
         <Field label={t('publisherQuestion')} hint={t('publisherHelp')}>
           <select value={config.output.agentId} onChange={event => setConfig(draft => selectPublisher(draft, event.target.value))}>
             {config.agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
           </select>
         </Field>
+        <Field label={t('author.metadata.description')}>
+          <textarea rows={3} value={typeof config.metadata?.description === 'string' ? config.metadata.description : ''}
+            onChange={event => setConfig(draft => ({ ...draft, metadata: { ...draft.metadata, description: event.target.value } }))} />
+        </Field>
+        <Field label={t('author.metadata.author')} hint={t('metadataHelp')}>
+          <input value={typeof config.metadata?.author === 'string' ? config.metadata.author : ''}
+            onChange={event => setConfig(draft => ({ ...draft, metadata: { ...draft.metadata, author: event.target.value } }))} />
+        </Field>
+        <More summary={t('author.extraMetadata')}><TypedField bufferKey={`${conversationId}/metadata`} value={config.metadata} chooseType={false} onChange={metadata => setConfig(draft => ({ ...draft, metadata }))}
+          onInvalid={invalid => update(state => ({ ...state, invalid: { ...state.invalid, '$team:metadata': invalid } }))} /></More>
       </section>
 
       <section className="rp-team-block">
@@ -57,46 +85,6 @@ export function TeamPage({ conversationId, editor, actions }) {
 
       <StateDefinitions conversationId={conversationId} editor={editor} />
       <MemoryDefinitions conversationId={conversationId} editor={editor} />
-
-      <section className="rp-team-block">
-        <h3>{t('authorMetadata')}</h3>
-        <p className="rp-team-note">{t('metadataHelp')}</p>
-        {['author', 'description'].map(key => <Field key={key} label={t(`author.metadata.${key}`)}><input value={typeof config.metadata?.[key] === 'string' ? config.metadata[key] : ''} onChange={event => setConfig(draft => ({ ...draft, metadata: { ...draft.metadata, [key]: event.target.value } }))} /></Field>)}
-        <More summary={t('author.extraMetadata')}><TypedField bufferKey={`${conversationId}/metadata`} value={config.metadata} chooseType={false} onChange={metadata => setConfig(draft => ({ ...draft, metadata }))}
-          onInvalid={invalid => update(state => ({ ...state, invalid: { ...state.invalid, '$team:metadata': invalid } }))} /></More>
-      </section>
-
-      <section className="rp-team-block">
-        <h3>{t('presetFiles')}</h3>
-        <p className="rp-team-note">{t('presetFilesHelp')}</p>
-        <div className="rp-team-button-row">
-          <button type="button" className="rp-team-quiet is-bordered" onClick={() => fileRef.current?.click()}>{t('import')}</button>
-          <button type="button" className="rp-team-quiet is-bordered" onClick={() => void actions.exportFile()}>{editor.dirty ? t('exportDraft') : t('export')}</button>
-          <input ref={fileRef} className="rp-team-file" type="file" accept="application/json,.json" tabIndex={-1} aria-hidden="true"
-            onChange={async event => {
-              const file = event.target.files?.[0]
-              event.target.value = ''
-              const imported = file ? await actions.readImport(file) : null
-              if (imported) offer(imported, { code: 'imported', name: imported.name })
-            }} />
-        </div>
-        <Field label={t('loadExample')} hint={t('exampleHint')}>
-          <select value="" onChange={event => {
-            const example = examples.find(item => item.id === event.target.value)
-            if (example) offer(example, { code: 'example', name: example.name })
-          }}>
-            <option value="">{t('chooseExample')}</option>
-            {examples.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
-        </Field>
-        {pending ? <div className="rp-team-callout is-warn" role="alert">
-          <p>{t('replaceDraftPrompt', { name: pending.config.name })}</p>
-          <div className="rp-team-button-row">
-            <button type="button" className="rp-team-quiet is-danger is-bordered" onClick={() => { actions.applyConfig(pending.config, pending.notice); setPending(null) }}>{t('replaceDraft')}</button>
-            <button type="button" className="rp-team-quiet" onClick={() => setPending(null)}>{t('keep')}</button>
-          </div>
-        </div> : null}
-      </section>
     </div>
   </div>
 }

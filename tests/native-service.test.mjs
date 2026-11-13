@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import nativeAgentTeamService from '@deepseek-ai/dsh-experimental-agent-team'
-import { apply, installNativeAgentTeamService, NATIVE_TEAM_MAX_MEMBERS } from '../src/host/native-service.mjs'
+import { apply, inject, installNativeAgentTeamService, NATIVE_TEAM_MAX_MEMBERS } from '../src/host/native-service.mjs'
+
+test('native service bootstrap has no story-state or runtime-extension dependency', () => {
+  assert.deepEqual(inject, [])
+})
 
 test('reuses an existing native agentTeams service without installing a second copy', async () => {
   const service = { name: 'already-installed' }
@@ -61,7 +65,9 @@ test('bootstraps the single packaged entry by activating the team service before
   assert.deepEqual(installed[0].config, { maxMembers: NATIVE_TEAM_MAX_MEMBERS })
   assert.equal(installed[1].plugin.name, 'rp-agent-team')
   assert.deepEqual(installed[1].plugin.inject, [
-    'agents', 'agentPresets', 'agentTeams', 'eleckoiRuntimeExtensions',
-    'eleckoiStoryState', 'eleckoiConversationChanges', 'eleckoiTrialSnapshots', 'credentials', 'llm', 'sessions', 'subagents', 'tools'
+    'agents', 'agentPresets', 'agentTeams', 'eleckoiConversationsApi', 'sessionController',
+    'eleckoiCharactersApi', 'eleckoiConversationModelsApi', 'eleckoiAgentPresetsApi',
+    'eleckoiCharacterConfigurationApi', 'settings',
+    'credentials', 'llm', 'sessions', 'sessionQuery', 'subagents', 'tools', 'attachments', 'pluginManager'
   ])
 })

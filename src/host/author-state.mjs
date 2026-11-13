@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { readSessionEvents } from './session-event-policy.mjs'
 import { resolveAuthorParameters } from '../shared/author-parameters.mjs'
 import {
   normalizeTeamConfig,
@@ -11,14 +12,15 @@ import {
 } from './state-store.mjs'
 
 /** Author-facing state reads and edits. All edits are journaled before host receipts are written. */
-export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, isConversationBusy = () => false, getRunRecords = () => [] }) {
-  const storyState = ctx.eleckoiStoryState
-  if (!storyState) throw new Error('ElecKoi story-state service is required for author state APIs')
+export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, isConversationBusy = () => false, getRunRecords = () => [], reconcileBranch = async () => undefined }) {
+  const conversations = ctx.eleckoiConversationsApi
+  if (!conversations) throw new Error('ElecKoi Conversations API is required for author state APIs')
 
   const recovered = Promise.resolve(recoveryReady).then(recoverPendingEdits)
 
   async function getState({ conversationId, agentId, runId }) {
     await recovered
+    await reconcileBranch(conversationId)
     const view = await readStateView(conversationId, runId)
     const selectedAgent = agentId ? view.config.agents.find(item => item.id === agentId) : undefined
     if (agentId && !selectedAgent) throw teamError('RP_TEAM_AGENT_NOT_FOUND', `Unknown state agent ${agentId}`)
@@ -78,6 +80,7 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
     await recovered
     const conversationId = requiredText(input.conversationId, 'conversationId')
     const operationId = requiredText(input.operationId, 'operationId')
+    await reconcileBranch(conversationId)
     const identity = {
       expectedRevision: input.expectedRevision,
       ...(input.expectedWorldHash === undefined ? {} : { expectedWorldHash: input.expectedWorldHash }),
@@ -89,14 +92,27 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
       if (stableJson(existing.identity) !== stableJson(identity)) {
         throw teamError('RP_TEAM_AUTHOR_EDIT_CONFLICT', 'An author operation id cannot be reused for different edits')
       }
-      const settled = await settlePendingEdit(conversationId, existing)
+      let settled = existing.hostRequired
+        ? await settlePendingEdit(conversationId, existing)
+        : stateStore.commitAuthorEdit({ conversationId, operationId })
+      if (settled.status === 'pending' && settled.hostRequired) {
+        const hostStatus = await conversations.stateEditStatus({ conversationId, operationId })
+        if (hostStatus.outcome === 'unknown') {
+          const hostReceipt = await conversations.editCurrentState(authorEditHostPayload(existing))
+          settled = settleAuthorEditReceipt(stateStore, conversationId, operationId, hostReceipt)
+        } else if (hostStatus.outcome === 'committed') {
+          settled = settleAuthorEditReceipt(stateStore, conversationId, operationId, hostStatus)
+        } else if (['failed', 'cancelled'].includes(hostStatus.outcome)) {
+          settled = stateStore.failAuthorEdit({ conversationId, operationId, reason: hostStatus.error ?? `ElecKoi state edit was ${hostStatus.outcome}` })
+        }
+      }
       if (settled.status === 'committed') return { operationId, status: 'committed', state: await getState({ conversationId }) }
       if (settled.status === 'failed') return { operationId, status: 'failed', error: settled.reason }
       return { operationId, status: 'pending' }
     }
 
     if (await isConversationBusy(conversationId)) throw conversationBusy()
-    await storyState.beginConversationWork({ conversationId, kind: 'author', workId: operationId })
+    let editBegun = false
     try {
       const view = await readStateView(conversationId)
       assertExpectedState(input, view)
@@ -110,6 +126,16 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
       }
       const hostOperations = next.normalizedOperations.filter(item => item.namespace === 'world')
       const hostRequired = hostOperations.length > 0
+      const hostPayload = hostRequired ? {
+        conversationId,
+        operationId,
+        expectedWorldHash: view.worldHash,
+        anchor: input.anchor ?? view.anchor,
+        ...(stableJson(view.host.rawWorld.variables) === stableJson(next.world.variables)
+          ? {} : { variableStateJson: JSON.stringify(next.world.variables) }),
+        ...(stableJson(view.host.settingLibrary) === stableJson(next.settingLibrary)
+          ? {} : { settingLibrary: cloneJson(next.settingLibrary) })
+      } : undefined
       stateStore.beginAuthorEdit({
         conversationId,
         operationId,
@@ -119,25 +145,25 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
         operations: next.normalizedOperations,
         anchor: input.anchor ?? view.anchor,
         identity,
-        worldBefore: view.host.rawWorld,
-        worldAfter: next.world,
+        worldBefore: { ...view.host.rawWorld, settingLibrary: view.host.settingLibrary, worldHash: view.worldHash },
+        worldAfter: { ...next.world, settingLibrary: next.settingLibrary },
         hostRequired
       })
-      storyState.setAuthorEditPending?.({ conversationId, operationId, pending: true })
+      editBegun = true
 
       let hostReceipt
       if (hostRequired) {
-        hostReceipt = await storyState.applyAuthorWorldEdit({
-          conversationId,
-          operationId,
-          expectedWorldHash: view.host.baseHash,
-          anchor: input.anchor ?? view.anchor,
-          operations: hostOperations
-        })
+        const result = await conversations.editCurrentState(hostPayload)
+        if (['failed', 'cancelled'].includes(result?.outcome)) {
+          const failed = stateStore.failAuthorEdit({ conversationId, operationId, reason: result.error ?? `ElecKoi state edit was ${result.outcome}` })
+          return { operationId, status: 'failed', error: failed.reason }
+        }
+        if (result?.outcome !== 'committed') return { operationId, status: 'pending' }
+        hostReceipt = nativeAuthorReceipt(result)
       }
       const receipt = stateStore.commitAuthorEdit({ conversationId, operationId, hostReceipt })
-      storyState.setAuthorEditPending?.({ conversationId, operationId, pending: false })
-      return { operationId, status: 'committed', state: await getState({ conversationId }), receipt }
+      if (receipt.status === 'pending') return { operationId, status: 'pending' }
+      return { operationId, status: receipt.status, state: await getState({ conversationId }), receipt }
     } catch (error) {
       const receipt = stateStore.getAuthorEdit(conversationId, operationId)
       if (receipt.status === 'pending') {
@@ -145,16 +171,19 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
         if (resolved.status === 'committed') return { operationId, status: 'committed', state: await getState({ conversationId }) }
         if (resolved.status === 'pending') return { operationId, status: 'pending' }
       }
+      if (receipt.status === 'unknown' && !editBegun) throw error
       if (receipt.status === 'unknown') stateStore.failAuthorEdit({ conversationId, operationId, reason: error.message ?? String(error) })
       throw error
-    } finally {
-      storyState.endConversationWork({ conversationId, kind: 'author', workId: operationId })
     }
   }
 
   async function getStateEditStatus({ conversationId, operationId }) {
     await recovered
     const receipt = stateStore.getAuthorEdit(conversationId, operationId)
+    if (receipt.status === 'unknown') {
+      const host = await conversations.stateEditStatus({ conversationId, operationId })
+      return { operationId, status: host.outcome === 'unknown' ? 'not_found' : host.outcome, ...(host.error ? { error: host.error } : {}) }
+    }
     const settled = await settlePendingEdit(conversationId, receipt)
     if (settled.status === 'unknown') return { operationId, status: 'not_found' }
     return {
@@ -166,37 +195,74 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
 
   async function listStateCheckpoints({ conversationId }) {
     await recovered
+    await reconcileBranch(conversationId)
     const view = await readStateView(conversationId)
     const result = [{
       id: 'current', label: '当前聊天状态', anchor: view.anchor,
       values: valuesFrom(view.definitions, view.namespaces, view.committed.pathVersions),
       branchStatus: 'current', canRewind: false
     }]
+    const hostEdits = await conversations.listStateEdits({ conversationId })
+    const hostByOperation = new Map((hostEdits.edits ?? []).map(edit => [edit.operationId, edit]))
     const authorEdits = stateStore.listAuthorEdits(conversationId)
-    const hostEdits = storyState.listAuthorWorldEdits(conversationId)
-    const hostByOperation = new Map(hostEdits.map(edit => [edit.operationId, edit]))
+    for (const hostEdit of hostEdits.edits ?? []) {
+      if (hostEdit.outcome !== 'committed') continue
+      const localEdit = authorEdits.find(item => item.operationId === hostEdit.operationId && item.status === 'committed')
+      const checkpointAnchor = hostEdit.anchor ?? localEdit?.hostReceipt?.anchor ?? localEdit?.anchor
+      if (hostEdit.legacyStateUnavailable) {
+        const values = view.definitions.length
+          ? view.definitions.map(item => ({ namespace: item.namespace, path: item.path, missing: true, unknown: true, version: 0 }))
+          : [{ namespace: 'world', path: '', missing: true, unknown: true, version: 0 }]
+        result.push({
+          id: `author:${hostEdit.operationId}`, label: `作者编辑 ${hostEdit.revision}（旧状态仅归档）`,
+          anchor: checkpointAnchor, values, branchStatus: 'archived', canRewind: false,
+          legacyStateUnavailable: true,
+          ...(hostEdit.legacyWorldBeforeJson !== undefined ? { legacyWorldBeforeJson: hostEdit.legacyWorldBeforeJson } : {}),
+          ...(hostEdit.legacyWorldAfterJson !== undefined ? { legacyWorldAfterJson: hostEdit.legacyWorldAfterJson } : {})
+        })
+        continue
+      }
+      if (!hostEdit.after || !hostEdit.before) continue
+      const canRewind = await isAnchorActive(ctx, checkpointAnchor, hostEdit.active ?? localEdit?.hostReceipt?.active)
+      const unknownPlugin = localEdit ? [] : view.definitions.filter(item => item.namespace !== 'world').map(item => item.namespace)
+      result.push(stateEditCheckpoint({
+        id: `author:${hostEdit.operationId}:before`, label: `作者编辑前 ${hostEdit.revision}`,
+        anchor: checkpointAnchor, world: worldFromAuthorState(hostEdit.before),
+        namespaces: localEdit?.beforeSnapshot.namespaces ?? view.committed.namespaces,
+        pathVersions: localEdit?.beforeSnapshot.pathVersions ?? view.committed.pathVersions,
+        unknownPlugin, definitions: view.definitions, canRewind
+      }))
+      result.push(stateEditCheckpoint({
+        id: `author:${hostEdit.operationId}`, label: `作者编辑 ${hostEdit.revision}`,
+        anchor: checkpointAnchor, world: worldFromAuthorState(hostEdit.after),
+        namespaces: localEdit?.afterSnapshot.namespaces ?? view.committed.namespaces,
+        pathVersions: localEdit?.afterSnapshot.pathVersions ?? view.committed.pathVersions,
+        unknownPlugin, definitions: view.definitions, canRewind
+      }))
+    }
     for (const edit of authorEdits) {
-      if (edit.status !== 'committed') continue
-      const hostReceipt = hostByOperation.get(edit.operationId) ?? edit.hostReceipt
-      const world = hostReceipt?.afterWorld ?? edit.worldAfter
-      const namespaces = { ...cloneJson(edit.afterSnapshot.namespaces), ...(world ? { world: cloneJson(world) } : {}) }
-      const checkpointAnchor = hostReceipt?.anchor ?? edit.anchor
-      const canRewind = Boolean(checkpointAnchor?.turn && checkpointAnchor?.eventSeq)
-        && await storyState.isAuthorAnchorAvailable({ conversationId, anchor: checkpointAnchor })
-      result.push({
-        id: `author:${edit.operationId}`,
-        label: `作者编辑 ${edit.revision}`,
-        anchor: checkpointAnchor,
-        values: valuesFrom(view.definitions, namespaces, edit.afterSnapshot.pathVersions, world ? [] : ['world']),
-        branchStatus: canRewind ? 'available' : 'missing',
-        canRewind
-      })
+      if (edit.status !== 'committed' || hostByOperation.has(edit.operationId)) continue
+      const checkpointAnchor = edit.anchor
+      const canRewind = await isAnchorActive(ctx, checkpointAnchor, edit.hostReceipt?.active)
+      result.push(stateEditCheckpoint({
+        id: `author:${edit.operationId}:before`, label: `作者编辑前 ${edit.revision}`,
+        anchor: checkpointAnchor, world: worldFromLocalWorld(edit.worldBefore),
+        namespaces: edit.beforeSnapshot.namespaces, pathVersions: edit.beforeSnapshot.pathVersions,
+        unknownPlugin: [], definitions: view.definitions, canRewind
+      }))
+      result.push(stateEditCheckpoint({
+        id: `author:${edit.operationId}`, label: `作者编辑 ${edit.revision}`,
+        anchor: checkpointAnchor, world: worldFromLocalWorld(edit.worldAfter),
+        namespaces: edit.afterSnapshot.namespaces, pathVersions: edit.afterSnapshot.pathVersions,
+        unknownPlugin: [], definitions: view.definitions, canRewind
+      }))
     }
     for (const run of committedRuns(stateStore.readConversation(conversationId))) {
-      const anchor = runAnchor(run)
+      const receipt = await conversations.turnCommitStatus({ conversationId, runId: run.runId })
+      const anchor = runAnchor({ ...run, receipt })
       if (!anchor) continue
       const runState = committedRunState(run)
-      const canRewind = await storyState.isAuthorAnchorAvailable({ conversationId, anchor })
+      const canRewind = await isAnchorActive(ctx, anchor, receipt.active)
       result.push({
         id: `run:${run.runId}`,
         label: `Team 运行 ${run.runId}`,
@@ -219,59 +285,24 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
     const checkpoint = (await listStateCheckpoints({ conversationId: input.conversationId })).checkpoints
       .find(item => item.id === input.checkpointId)
     if (!checkpoint) throw teamError('RP_TEAM_CHECKPOINT_NOT_FOUND', 'Unknown state checkpoint')
-    if (input.mode === 'values') {
-      const selected = new Set((input.paths ?? []).map(item => pathKey(item.namespace, item.path)))
-      const operations = checkpoint.values
-        .filter(item => (item.path !== '' || item.namespace !== 'world')
-          && !item.unknown && (!selected.size || selected.has(pathKey(item.namespace, item.path))))
-        .map(item => item.missing
-          ? { namespace: item.namespace, path: item.path, operation: 'remove' }
-          : { namespace: item.namespace, path: item.path, operation: 'set', value: cloneJson(item.value) })
-      if (!operations.length) throw teamError('RP_TEAM_CHECKPOINT_VALUES_UNAVAILABLE', 'This checkpoint has no provable values to restore')
-      return applyStateEdit({
-        conversationId: input.conversationId,
-        operationId: input.operationId,
-        expectedRevision: input.expectedRevision,
-        expectedWorldHash: current.worldHash,
-        anchor: current.anchor,
-        operations
-      })
-    }
-    if (input.mode !== 'rewind') throw teamError('RP_TEAM_CHECKPOINT_MODE_INVALID', 'Checkpoint mode must be values or rewind')
-    if (!checkpoint.canRewind) throw teamError('RP_TEAM_CHECKPOINT_UNAVAILABLE', 'This checkpoint is no longer on the current Session branch')
-    if (await isConversationBusy(input.conversationId)) throw conversationBusy()
-    await storyState.beginConversationWork({ conversationId: input.conversationId, kind: 'author', workId: input.operationId })
-    let beforeSnapshot
-    let pluginSnapshotRestored = false
-    try {
-      const gatedView = await readStateView(input.conversationId)
-      assertExpectedState({
-        expectedRevision: current.revision,
-        expectedWorldHash: current.worldHash,
-        anchor: current.anchor
-      }, gatedView)
-      beforeSnapshot = stateStore.committedSnapshot({ conversationId: input.conversationId })
-      await storyState.rewindAuthorCheckpoint({
-        conversationId: input.conversationId,
-        anchor: checkpoint.anchor,
-        worldSnapshot: checkpointWorldSnapshot(input.checkpointId, stateStore, input.conversationId),
-        restoreState: () => {
-          const saved = checkpointPluginSnapshot(input.checkpointId, stateStore, input.conversationId)
-          if (saved) {
-            pluginSnapshotRestored = true
-            stateStore.restoreCommittedSnapshot({ conversationId: input.conversationId, snapshot: saved })
-          }
-        }
-      })
-      return { operationId: input.operationId, status: 'committed', state: await getState({ conversationId: input.conversationId }) }
-    } catch (error) {
-      if (pluginSnapshotRestored && beforeSnapshot) {
-        stateStore.restoreCommittedSnapshot({ conversationId: input.conversationId, snapshot: beforeSnapshot })
-      }
-      throw error
-    } finally {
-      storyState.endConversationWork({ conversationId: input.conversationId, kind: 'author', workId: input.operationId })
-    }
+    if (!['values', 'rewind'].includes(input.mode)) throw teamError('RP_TEAM_CHECKPOINT_MODE_INVALID', 'Checkpoint mode must be values or rewind')
+    if (input.mode === 'rewind' && !checkpoint.canRewind) throw teamError('RP_TEAM_CHECKPOINT_UNAVAILABLE', 'This checkpoint is no longer on the current Session branch')
+    const selected = new Set((input.paths ?? []).map(item => pathKey(item.namespace, item.path)))
+    const operations = checkpoint.values
+      .filter(item => (item.path !== '' || item.namespace !== 'world')
+        && !item.unknown && (!selected.size || selected.has(pathKey(item.namespace, item.path))))
+      .map(item => item.missing
+        ? { namespace: item.namespace, path: item.path, operation: 'remove' }
+        : { namespace: item.namespace, path: item.path, operation: 'set', value: cloneJson(item.value) })
+    if (!operations.length) throw teamError('RP_TEAM_CHECKPOINT_VALUES_UNAVAILABLE', 'This checkpoint has no provable values to restore')
+    return applyStateEdit({
+      conversationId: input.conversationId,
+      operationId: input.operationId,
+      expectedRevision: input.expectedRevision,
+      expectedWorldHash: current.worldHash,
+      anchor: current.anchor,
+      operations
+    })
   }
 
   async function readStateView(conversationId, runId) {
@@ -279,7 +310,26 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
     const saved = store.get(id)
     const frozenRun = runId ? getRunRecords(id).find(record => (record.status?.runId ?? record.runId) === runId) : undefined
     const config = frozenRun?.config ? normalizeTeamConfig(frozenRun.config) : resolveAuthorParameters(saved.config, saved.parameterValues).config
-    const host = await storyState.authorSnapshot({ conversationId: id })
+    const [details, authorState, hostEdits] = await Promise.all([
+      conversations.details(id),
+      conversations.authorState(id),
+      conversations.listStateEdits({ conversationId: id })
+    ])
+    const runtimeSessionId = String(details.runtimeSessionId ?? '')
+    let sessionEvents = []
+    if (runtimeSessionId) sessionEvents = await readSessionEvents(ctx, runtimeSessionId)
+    const variables = parseObject(authorState.editableVariableStateJson ?? authorState.currentVariableStateJson)
+    const initialVariables = parseObject(authorState.initialVariableStateJson)
+    const settingLibrary = authorState.editableSettingLibrary !== undefined
+      ? cloneJson(authorState.editableSettingLibrary)
+      : cloneJson(authorState.settingLibrary ?? { groups: [], entries: [] })
+    const host = {
+      rawWorld: { variables, settings: settingContents(settingLibrary) },
+      initialWorld: { variables: initialVariables, settings: {} },
+      settingLibrary,
+      anchor: latestSessionAnchor(runtimeSessionId, sessionEvents),
+      busy: Boolean(await isConversationBusy(id))
+    }
     const committed = stateStore.committedSnapshot({ conversationId: id })
     const namespaces = { ...cloneJson(committed.namespaces), world: cloneJson(host.rawWorld) }
     const definitions = withNativeDefinitions(config.state.definitions, host)
@@ -290,11 +340,10 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
     const issues = []
     try { validateConfiguredStateSnapshot(config, namespaces) }
     catch (error) { issues.push({ code: error?.code ?? 'RP_TEAM_STATE_INVALID', message: String(error?.message ?? error) }) }
-    const hostReceipts = storyState.listAuthorWorldEdits(id)
-    const hostRevision = hostReceipts.reduce((max, item) => Math.max(max, Number(item.revision) || 0), 0)
+    const hostRevision = Math.max(0, ...(hostEdits.edits ?? []).map(item => Number(item.revision) || 0))
     const records = stateStore.listAuthorEdits(id)
     const revision = committed.revision + hostRevision
-    const worldHash = hashJson({ namespaces, anchor: host.anchor })
+    const worldHash = hashJson({ variables, settingLibrary })
     const activeRecords = typeof getRunRecords === 'function' ? getRunRecords(id) : []
     const storedRuns = Object.values(stateStore.readConversation(id).runs)
     const stagedRun = runId
@@ -305,7 +354,7 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
       conversationId: id, config, host, committed, namespaces, definitions,
       hostRevision, revision, worldHash,
       anchor: host.anchor,
-      busy: host.busy || await isConversationBusy(id),
+      busy: host.busy,
       issues,
       pending: records.filter(item => item.status === 'pending'),
       stagedValues,
@@ -322,21 +371,16 @@ export function createAuthorStateApi({ ctx, store, stateStore, recoveryReady, is
     if (edit.status !== 'pending') return edit
     if (!edit.hostRequired) {
       const committed = stateStore.commitAuthorEdit({ conversationId, operationId: edit.operationId })
-      storyState.setAuthorEditPending?.({ conversationId, operationId: edit.operationId, pending: false })
       return committed
     }
-    const host = await storyState.getAuthorWorldEditStatus({ conversationId, operationId: edit.operationId })
-    if (host.status === 'committed') {
-      const committed = stateStore.commitAuthorEdit({ conversationId, operationId: edit.operationId, hostReceipt: host })
-      storyState.setAuthorEditPending?.({ conversationId, operationId: edit.operationId, pending: false })
-      return committed
+    const host = await conversations.stateEditStatus({ conversationId, operationId: edit.operationId })
+    if (host.outcome === 'committed') {
+      return settleAuthorEditReceipt(stateStore, conversationId, edit.operationId, host)
     }
-    if (host.status === 'unknown') {
-      const failed = stateStore.failAuthorEdit({ conversationId, operationId: edit.operationId, reason: 'ElecKoi world receipt was not committed' })
-      storyState.setAuthorEditPending?.({ conversationId, operationId: edit.operationId, pending: false })
+    if (['failed', 'cancelled'].includes(host.outcome)) {
+      const failed = stateStore.failAuthorEdit({ conversationId, operationId: edit.operationId, reason: host.error ?? `ElecKoi state edit was ${host.outcome}` })
       return failed
     }
-    storyState.setAuthorEditPending?.({ conversationId, operationId: edit.operationId, pending: true })
     return edit
   }
 
@@ -382,8 +426,8 @@ function withNativeDefinitions(definitions, host) {
     if (!Object.hasOwn(stateDefinition, 'default') && Object.hasOwn(initial, key)) stateDefinition.default = cloneJson(initial[key])
     byKey.set(pathKey('world', path), stateDefinition)
   }
-  for (const [file, content] of Object.entries(host.rawWorld?.settings ?? {})) {
-    const path = `/settings/${escapePointer(file)}`
+  for (const [entryId, content] of Object.entries(host.rawWorld?.settings ?? {})) {
+    const path = `/settings/${escapePointer(entryId)}`
     const existing = byKey.get(pathKey('world', path)) ?? {}
     byKey.set(pathKey('world', path), { ...existing, namespace: 'world', path, type: existing.type ?? 'string', description: existing.description ?? '对话设定源文本' })
   }
@@ -395,6 +439,7 @@ function applyAuthorStateOperations(view, operations) {
   const configDefinitions = view.definitions
   const pluginNamespaces = cloneJson(view.committed.namespaces)
   let world = cloneJson(view.host.rawWorld)
+  let settingLibrary = cloneJson(view.host.settingLibrary)
   const normalizedOperations = []
   const pathVersions = { ...view.committed.pathVersions }
   const nextRevision = view.committed.revision + 1
@@ -435,6 +480,12 @@ function applyAuthorStateOperations(view, operations) {
       }
       if (operation === 'remove') deletePointer(world, input.path)
       else setPointer(world, input.path, value)
+      if (input.path.startsWith('/settings/')) {
+        const entryId = decodePointer(input.path).at(1)
+        const entry = settingLibrary?.entries?.find(item => item.id === entryId)
+        if (!entry) throw teamError('RP_TEAM_STATE_PATH_UNDEFINED', `Unknown SettingLibrary entry ${entryId}`)
+        entry.content = value
+      }
       normalizedOperations.push({ namespace: input.namespace, path: input.path, operation, ...(operation === 'set' ? { value: cloneJson(value) } : {}) })
     } else {
       if (input.namespace !== 'shared' && !input.namespace.startsWith('private:')) {
@@ -455,7 +506,7 @@ function applyAuthorStateOperations(view, operations) {
     }
   }
   validateConfiguredStateSnapshot(view.config, { ...pluginNamespaces, world })
-  return { pluginNamespaces, world, pathVersions, touched, normalizedOperations }
+  return { pluginNamespaces, world, settingLibrary, pathVersions, touched, normalizedOperations }
 }
 
 function canRead(agent, namespace, path) {
@@ -508,8 +559,14 @@ function committedRuns(record) {
 
 function runAnchor(run) {
   const receipt = run.receipt
-  if (!receipt || !Number.isSafeInteger(receipt.turn) || !Number.isSafeInteger(receipt.assistantSeq)) return undefined
-  return { sessionId: receipt.sessionId, turn: receipt.turn, eventSeq: receipt.assistantSeq, messageId: receipt.assistantMessageId }
+  if (!receipt || !Number.isSafeInteger(receipt.turn) || !Number.isSafeInteger(receipt.assistantSeq)
+    || !receipt.sessionId || !receipt.assistantMessageId) return undefined
+  return {
+    sessionId: receipt.sessionId, turn: receipt.turn,
+    ...(receipt.inputMessageId ? { inputMessageId: receipt.inputMessageId } : {}),
+    ...(Number.isSafeInteger(receipt.inputEventSeq) ? { inputEventSeq: receipt.inputEventSeq } : {}),
+    assistantMessageId: receipt.assistantMessageId, assistantSeq: receipt.assistantSeq
+  }
 }
 
 function committedRunState(run) {
@@ -562,29 +619,103 @@ function stagedValueMap(run) {
   return result
 }
 
-function checkpointPluginSnapshot(checkpointId, stateStore, conversationId) {
-  if (checkpointId.startsWith('author:')) {
-    const edit = stateStore.getAuthorEdit(conversationId, checkpointId.slice('author:'.length))
-    return edit.status === 'committed' ? edit.afterSnapshot : undefined
-  }
-  if (checkpointId.startsWith('run:')) {
-    const run = own(stateStore.readConversation(conversationId).runs, checkpointId.slice('run:'.length))
-    return run?.status === 'committed' ? committedRunState(run) : undefined
-  }
-  return undefined
+function settingContents(library) {
+  return Object.fromEntries((library?.entries ?? []).filter(entry => typeof entry.id === 'string' && typeof entry.content === 'string')
+    .map(entry => [entry.id, entry.content]))
 }
 
-function checkpointWorldSnapshot(checkpointId, stateStore, conversationId) {
-  if (checkpointId.startsWith('author:')) {
-    const edit = stateStore.getAuthorEdit(conversationId, checkpointId.slice('author:'.length))
-    return edit.status === 'committed' ? edit.worldAfter : undefined
+function worldFromAuthorState(state) {
+  if (!state || typeof state !== 'object') return undefined
+  return {
+    variables: parseObject(state.variableStateJson),
+    settings: settingContents(state.settingLibrary)
   }
-  if (checkpointId.startsWith('run:')) {
-    const run = own(stateStore.readConversation(conversationId).runs, checkpointId.slice('run:'.length))
-    if (run?.status !== 'committed' || !Object.hasOwn(run.state ?? {}, 'world')) return undefined
-    return committedRunState(run).namespaces.world
+}
+
+function worldFromLocalWorld(world) {
+  if (!world || typeof world !== 'object') return undefined
+  return { variables: cloneJson(world.variables ?? {}), settings: cloneJson(world.settings ?? {}) }
+}
+
+function stateEditCheckpoint({ id, label, anchor, world, namespaces, pathVersions, unknownPlugin, definitions, canRewind }) {
+  const snapshot = { ...cloneJson(namespaces ?? {}), ...(world ? { world } : {}) }
+  const unknown = [...unknownPlugin]
+  if (!world) unknown.push('world')
+  return {
+    id, label, anchor,
+    values: valuesFrom(definitions, snapshot, pathVersions, unknown),
+    branchStatus: canRewind ? 'available' : 'missing', canRewind
   }
-  return undefined
+}
+
+function nativeAuthorReceipt(receipt) {
+  if (!receipt || receipt.outcome !== 'committed') return undefined
+  return { ...receipt, status: 'committed' }
+}
+
+function settleAuthorEditReceipt(stateStore, conversationId, operationId, receipt) {
+  const normalized = nativeAuthorReceipt(receipt)
+  if (!normalized) return { operationId, status: 'pending' }
+  return stateStore.commitAuthorEdit({ conversationId, operationId, hostReceipt: normalized })
+}
+
+function authorEditHostPayload(edit) {
+  const before = edit.worldBefore ?? {}
+  const after = edit.worldAfter ?? {}
+  return {
+    conversationId: edit.conversationId,
+    operationId: edit.operationId,
+    expectedWorldHash: edit.worldBefore?.worldHash ?? edit.identity.expectedWorldHash,
+    ...(edit.anchor ? { anchor: edit.anchor } : {}),
+    ...(stableJson(before.variables) === stableJson(after.variables) || after.variables === undefined
+      ? {} : { variableStateJson: JSON.stringify(after.variables) }),
+    ...(stableJson(before.settingLibrary) === stableJson(after.settingLibrary) || after.settingLibrary === undefined
+      ? {} : { settingLibrary: cloneJson(after.settingLibrary) })
+  }
+}
+
+async function isAnchorActive(ctx, anchor, active) {
+  if (typeof active === 'boolean') return active
+  if (!anchor?.sessionId || !Number.isSafeInteger(anchor.turn)) return false
+  const events = await readSessionEvents(ctx, anchor.sessionId)
+  const identityExists = (id, seq, role) => events.some(event => {
+    const data = event?.data ?? event
+    const message = data?.message ?? data?.item ?? data
+    return (!role || message?.role === role || event?.type === `${role}/message`)
+      && (!id || message?.id === id || data?.messageId === id)
+      && (!Number.isSafeInteger(seq) || event?.seq === seq || data?.seq === seq)
+  })
+  if (anchor.inputMessageId && !identityExists(anchor.inputMessageId, anchor.inputEventSeq, 'user')) return false
+  if (anchor.assistantMessageId && !identityExists(anchor.assistantMessageId, anchor.assistantSeq, 'assistant')) return false
+  return Boolean(anchor.inputMessageId || anchor.assistantMessageId || events.some(event => {
+    const data = event?.data ?? event
+    return event?.type === 'turn/end' && data?.turn === anchor.turn
+  }))
+}
+
+function latestSessionAnchor(sessionId, events) {
+  if (!sessionId || !Array.isArray(events)) return undefined
+  const turnEndIndexes = events.map((event, index) => event?.type === 'turn/end' ? index : -1).filter(index => index >= 0)
+  const turnEndIndex = turnEndIndexes.at(-1)
+  const turnEnd = turnEndIndex === undefined ? undefined : events[turnEndIndex]
+  if (!turnEnd) return undefined
+  const turn = (turnEnd.data ?? turnEnd).turn
+  const priorTurnEndIndex = turnEndIndexes.at(-2) ?? -1
+  const messages = events.slice(priorTurnEndIndex + 1, turnEndIndex + 1).flatMap(event => {
+    const data = event?.data ?? event
+    const role = event?.type === 'user/message' ? 'user' : event?.type === 'assistant/message' ? 'assistant' : undefined
+    const message = role === 'user' ? data?.message ?? data?.item ?? data : data?.message ?? data?.item
+    return role && message ? [{ event, data, message: { ...message, role } }] : []
+  })
+  const assistant = messages.filter(item => item.message.role === 'assistant' && (item.data.turn === undefined || item.data.turn === turn)).at(-1)
+  const input = [...messages].reverse().find(item => item.message.role === 'user')
+  return {
+    sessionId, turn,
+    ...(input?.message?.id ? { inputMessageId: input.message.id } : {}),
+    ...(Number.isSafeInteger(input?.event?.seq) ? { inputEventSeq: input.event.seq } : {}),
+    ...(assistant?.message?.id ? { assistantMessageId: assistant.message.id } : {}),
+    ...(Number.isSafeInteger(assistant?.event?.seq) ? { assistantSeq: assistant.event.seq } : {})
+  }
 }
 
 function getPointer(value, path) {

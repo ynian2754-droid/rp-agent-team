@@ -1,18 +1,21 @@
 import { React } from './react.js'
 import { t } from './i18n.js'
-import { drafts } from './client-state.js'
-import { addAgent, removeAgent, selectPublisher, validJsonShape } from './editor-model.js'
-import { dropMemberBuffers, editConfig, editMember, setRawJson } from './draft-state.js'
-import { memberIssues, modelInfo, presetInfo, peersFor, sourceTypes, stateCounts, triggerTypes } from './summaries.js'
+import { drafts, workspaceUi, useKeyed } from './client-state.js'
+import { addAgent, removeAgent, validJsonShape } from './editor-model.js'
+import { dropMemberBuffers, editConfig, editMember, setRawJson, tabForSection } from './draft-state.js'
+import { memberIssues, modelInfo, presetInfo, peersFor, sourceTypes, stateCounts } from './summaries.js'
 import { labelList, nameList } from './format.js'
-import { ConfirmButton, Icon } from './fields.jsx'
-import { CommunicationSection, ContextSection, IdentitySection, OutputSection, StateSection, TriggerSection } from './member-sections.jsx'
+import { triggerSummary } from './explain.js'
+import { ConfirmButton, Icon, Segmented, Sigil } from './fields.jsx'
+import { CommunicationSection, ContextSection, ModelSection, OutputSection, PromptSection, StateSection, TriggerSection } from './member-sections.jsx'
 
 const REFERENCE_ISSUES = new Set(['missingProvider', 'missingModel', 'missingPreset', 'brokenPreset'])
 export const SECTIONS = ['identity', 'trigger', 'context', 'communication', 'state', 'output']
-const SECTION_COMPONENTS = { identity: IdentitySection, trigger: TriggerSection, context: ContextSection, communication: CommunicationSection, state: StateSection, output: OutputSection }
+/** One tab per thing an author comes to change. */
+export const MEMBER_TABS = ['prompt', 'model', 'trigger', 'context', 'links', 'access']
+const TAB_SECTIONS = { prompt: [], model: ['identity'], trigger: ['trigger'], context: ['context'], links: ['communication'], access: ['state', 'output'] }
 
-/** One plain-language line per question; the editors stay folded until asked for. */
+/** One plain-language line per question, shown above the controls that produce it. */
 export function sectionSummary(section, member, config, options) {
   if (section === 'identity') {
     const model = modelInfo(member, options)
@@ -24,23 +27,20 @@ export function sectionSummary(section, member, config, options) {
     const presetText = preset.kind === 'none' ? t('summary.noPreset') : preset.preset?.name || preset.id
     return `${modelText}${t('listSep')}${presetText}`
   }
-  if (section === 'trigger') {
-    const types = triggerTypes(member)
-    const parts = [types.length ? labelList(types, 'triggerShort') : t('summary.neverRuns')]
-    if (member.execution.after.length) parts.push(t('summary.after', { names: nameList(config, member.execution.after, 2) }))
-    return parts.join(t('clauseSep'))
-  }
+  if (section === 'trigger') return triggerSummary(member, config, 4)
   if (section === 'context') {
     const types = sourceTypes(member)
     return types.length ? labelList(types, 'sourceShort') : t('summary.noContext')
   }
   if (section === 'communication') {
     const parts = []
+    const handoffs = member.communication.handoffs || []
+    if (handoffs.length) parts.push(t('summary.handoffs', { names: nameList(config, [...new Set(handoffs.map(item => item.to))], 2) }))
     for (const key of ['sendTo', 'requestTo', 'receiveFrom']) {
       const peers = peersFor(config, member, key)
       if (peers.length) parts.push(t(`summary.${key}`, { names: nameList(config, peers, 2) }))
     }
-    return parts.length ? parts.slice(0, 2).join(t('clauseSep')) : t('summary.noCommunication')
+    return parts.length ? parts.slice(0, 3).join(t('clauseSep')) : t('summary.noCommunication')
   }
   if (section === 'state') {
     const counts = stateCounts(config, member)
@@ -59,36 +59,46 @@ export function sectionSummary(section, member, config, options) {
 }
 
 function rosterMeta(member, config) {
-  const types = triggerTypes(member)
-  const parts = [types.length ? labelList(types, 'triggerShort', 2) : t('summary.neverRuns')]
-  if (member.execution.after.length) parts.push(t('summary.after', { names: nameList(config, member.execution.after, 1) }))
-  return parts.join(t('clauseSep'))
+  const parts = [triggerSummary(member, config)]
+  const asks = peersFor(config, member, 'requestTo')
+  if (asks.length) parts.push(t('summary.requestTo', { names: nameList(config, asks, 2) }))
+  return parts.join(' · ')
 }
 
-export function MembersPage({ conversationId, editor, snapshot }) {
+export function MembersPage({ conversationId, editor, snapshot, changes }) {
   const config = editor.draft
   const options = snapshot.options
+  const ui = useKeyed(workspaceUi, conversationId)
   const member = config.agents.find(agent => agent.id === editor.selectedId) || config.agents[0]
+  const memberIndex = config.agents.indexOf(member)
+  const tab = MEMBER_TABS.includes(ui.memberTab) ? ui.memberTab : 'prompt'
+  const [focus, setFocus] = React.useState(false)
   const rosterRef = React.useRef(null)
   const headingRef = React.useRef(null)
   const update = change => drafts.update(conversationId, change)
+  const setTab = next => workspaceUi.update(conversationId, { memberTab: next })
   const invalidKeys = Object.keys(editor.invalid)
   const issues = React.useMemo(() => Object.fromEntries(config.agents.map(agent => [agent.id, memberIssues(agent, config, options, invalidKeys)])),
     [config, options, editor.invalid])
+  const changed = new Map(changes.members.map(item => [item.id, item.kind]))
   const focusLater = fn => requestAnimationFrame(() => requestAnimationFrame(fn))
   const select = id => {
+    setFocus(false)
     update(state => ({ ...state, selectedId: id, view: 'member' }))
     focusLater(() => headingRef.current?.focus())
   }
   const back = () => {
+    setFocus(false)
     update(state => ({ ...state, view: 'roster' }))
     focusLater(() => rosterRef.current?.querySelector(`[data-member="${CSS.escape(member.id)}"]`)?.focus())
   }
   const add = source => {
+    setFocus(false)
     update(state => {
       const added = addAgent(state.draft, source, { name: t('newMember'), copyName: name => t('copyName', { name }) })
-      return { ...editConfig(state, added.config), selectedId: added.selectedId, view: 'member', open: { ...state.open, identity: true } }
+      return { ...editConfig(state, added.config), selectedId: added.selectedId, view: 'member' }
     })
+    setTab('prompt')
     focusLater(() => headingRef.current?.focus())
   }
   const remove = () => update(state => {
@@ -117,83 +127,85 @@ export function MembersPage({ conversationId, editor, snapshot }) {
     }
   }
   const changeConfig = change => update(state => editConfig(state, change(state.draft)))
-  const toggleSection = section => update(state => ({ ...state, open: { ...state.open, [section]: !state.open[section] } }))
-  const allOpen = SECTIONS.every(section => editor.open[section])
+  const setInvalid = (key, invalid) => update(state => {
+    const next = { ...state.invalid }
+    if (invalid) next[`${member.id}:${key}`] = true
+    else for (const field of Object.keys(next)) if (field.startsWith(`${member.id}:${key}`)) delete next[field]
+    return { ...state, invalid: next }
+  })
   const memberIssueList = issues[member.id] || []
+  const issuesFor = name => memberIssueList.filter(issue => tabForSection(issue.section) === name)
+  const tabOptions = MEMBER_TABS.map(name => {
+    const list = issuesFor(name)
+    const level = list.some(issue => issue.level === 'error') ? 'failed' : list.length ? 'warn' : ''
+    return { id: name, label: t(`mtab.${name}`), title: t(`mtabHint.${name}`), ...(level ? { mark: level, markLabel: list.map(issue => t(`issue.${issue.code}`)).join(' ') } : {}) }
+  })
+  const props = { conversationId, member, config, options, edit, json, changeConfig, setInvalid }
+  const publisher = config.output.agentId === member.id
+  const focused = focus && tab === 'prompt'
 
   return <div className="rp-team-members" data-view={editor.view === 'member' ? 'member' : 'roster'}>
     <div className="rp-team-roster rp-team-scroll" ref={rosterRef}>
-      <div className="rp-team-publisher">
-        <label htmlFor={`${conversationId}-publisher`}>{t('publisherQuestion')}</label>
-        <select id={`${conversationId}-publisher`} value={config.output.agentId} onChange={event => changeConfig(draft => selectPublisher(draft, event.target.value))}>
-          {config.agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
-        </select>
-      </div>
       <ul className="rp-team-roster-list" aria-label={t('members')}>
-        {config.agents.map(agent => {
+        {config.agents.map((agent, index) => {
           const list = issues[agent.id] || []
           const flag = list.some(issue => issue.level === 'error') ? 'error' : list.some(issue => REFERENCE_ISSUES.has(issue.code)) ? 'warn' : ''
           const flagText = flag === 'error' ? t('memberHasErrors') : t('memberHasMissing')
+          const kind = changed.get(agent.id)
           return <li key={agent.id}>
             <button type="button" className="rp-team-roster-item" data-member={agent.id} aria-current={agent.id === member.id ? 'true' : undefined} onClick={() => select(agent.id)}>
-              <span className="rp-team-roster-name">{agent.name}</span>
-              {config.output.agentId === agent.id ? <span className="rp-team-tag">{t('publisherTag')}</span> : null}
-              {flag ? <span className={`rp-team-roster-issue is-${flag}`} title={flagText}><Icon name="warn" /><span className="rp-team-sr">{flagText}</span></span> : null}
+              <Sigil name={agent.name} index={index} />
+              <span className="rp-team-roster-top">
+                <span className="rp-team-roster-name">{agent.name}</span>
+                {config.output.agentId === agent.id ? <span className="rp-team-tag">{t('roster.publisher')}</span> : null}
+                {kind ? <span className="rp-team-dirty" title={t(kind === 'added' ? 'roster.added' : 'roster.changed')}><span className="rp-team-sr">{t(kind === 'added' ? 'roster.added' : 'roster.changed')}</span></span> : null}
+                {flag ? <span className={`rp-team-roster-issue is-${flag}`} title={flagText}><Icon name="warn" /><span className="rp-team-sr">{flagText}</span></span> : null}
+              </span>
               <span className="rp-team-roster-meta">{rosterMeta(agent, config)}</span>
+              {agent.description ? <span className="rp-team-roster-desc">{agent.description}</span> : null}
               <Icon name="chevron" className="rp-team-roster-chevron" />
             </button>
           </li>
         })}
       </ul>
       <button type="button" className="rp-team-add" onClick={() => add()}><Icon name="plus" />{t('addMember')}</button>
+      {changes.removed.length ? <p className="rp-team-note rp-team-roster-removed">{t('roster.removed', { names: changes.removed.join(t('listSep')) })}</p> : null}
     </div>
 
-    <div className="rp-team-sheet rp-team-scroll">
-      <div className="rp-team-sheet-head">
+    <div className={`rp-team-sheet ${focused ? 'is-focus' : 'rp-team-scroll'}`}>
+      {focused ? null : <div className="rp-team-sheet-head">
         <button type="button" className="rp-team-back" onClick={back}><Icon name="back" />{t('backToMembers')}</button>
         <div className="rp-team-sheet-title">
+          <Sigil name={member.name} index={memberIndex} size="large" />
           <h3 ref={headingRef} tabIndex={-1}>{member.name}</h3>
-          {config.output.agentId === member.id ? <span className="rp-team-tag">{t('publisherTag')}</span> : null}
+          {publisher ? <span className="rp-team-tag">{t('roster.publisher')}</span> : null}
+          {changed.has(member.id) ? <span className="rp-team-chip is-draft">{t(changed.get(member.id) === 'added' ? 'roster.added' : 'roster.changed')}</span> : null}
+          <span className="rp-team-sheet-actions">
+            <button type="button" className="rp-team-quiet" onClick={() => add(member)}>{t('duplicateMember')}</button>
+            <ConfirmButton label={t('removeMember')} confirmLabel={t('confirmRemove')} disabled={config.agents.length === 1} onConfirm={remove} />
+          </span>
         </div>
-        <p className="rp-team-sheet-desc">{member.description || t('noDescription')}</p>
-        <div className="rp-team-sheet-actions">
-          <button type="button" className="rp-team-quiet" onClick={() => update(state => ({ ...state, open: Object.fromEntries(SECTIONS.map(section => [section, !allOpen])) }))}>
-            {allOpen ? t('collapseAll') : t('expandAll')}
-          </button>
-          <button type="button" className="rp-team-quiet" onClick={() => add(member)}>{t('duplicateMember')}</button>
-          <ConfirmButton label={t('removeMember')} confirmLabel={t('confirmRemove')} disabled={config.agents.length === 1} onConfirm={remove} />
-        </div>
-      </div>
-      <div className="rp-team-questions">
-        {SECTIONS.map(section => {
-          const Editor = SECTION_COMPONENTS[section]
-          const open = Boolean(editor.open[section])
-          return <Question key={section} section={section} open={open} onToggle={() => toggleSection(section)}
-            summary={sectionSummary(section, member, config, options)} issues={memberIssueList.filter(issue => issue.section === section)}>
-            {open ? <Editor key={member.id} conversationId={conversationId} member={member} config={config} options={options} edit={edit} json={json} changeConfig={changeConfig}
-              setInvalid={(key, invalid) => update(state => { const next = { ...state.invalid }; if (invalid) next[`${member.id}:${key}`] = true; else for (const field of Object.keys(next)) if (field.startsWith(`${member.id}:${key}`)) delete next[field]; return { ...state, invalid: next } })} /> : null}
-          </Question>
-        })}
+      </div>}
+      {focused ? null : <Segmented className="rp-team-mtabs" label={t('mtab.label')} value={tab} options={tabOptions} onChange={setTab} />}
+      <div className="rp-team-mtab-body" key={`${member.id}:${tab}`}>
+        {focused ? null : <TabLead tab={tab} member={member} config={config} options={options} issues={issuesFor(tab)} />}
+        {tab === 'prompt' ? <PromptSection {...props} focus={focused} onFocus={setFocus} />
+          : tab === 'model' ? <ModelSection {...props} />
+            : tab === 'trigger' ? <TriggerSection {...props} />
+              : tab === 'context' ? <ContextSection {...props} />
+                : tab === 'links' ? <CommunicationSection {...props} />
+                  : <><StateSection {...props} /><OutputSection {...props} /></>}
       </div>
     </div>
   </div>
 }
 
-function Question({ section, open, onToggle, summary, issues, children }) {
-  const bodyId = React.useId()
-  const level = issues.some(issue => issue.level === 'error') ? 'error' : issues.length ? 'warn' : ''
-  return <section className={`rp-team-question ${open ? 'is-open' : ''}`}>
-    <h4>
-      <button type="button" aria-expanded={open} aria-controls={open ? bodyId : undefined} onClick={onToggle}>
-        <Icon name="chevron" className="rp-team-q-chevron" />
-        <span className="rp-team-q-title">{t(`section.${section}`)}</span>
-        <span className="rp-team-q-summary">{summary}</span>
-        {level ? <span className={`rp-team-q-issue is-${level}`}><Icon name="warn" /><span className="rp-team-sr">{issues.map(issue => t(`issue.${issue.code}`)).join(' ')}</span></span> : null}
-      </button>
-    </h4>
-    {open ? <div id={bodyId} className="rp-team-q-body">
-      {issues.length ? <ul className="rp-team-issues">{issues.map((issue, index) => <li key={`${issue.code}-${index}`} className={`is-${issue.level}`}>{t(`issue.${issue.code}`)}</li>)}</ul> : null}
-      {children}
-    </div> : null}
-  </section>
+/** What the controls below currently add up to, plus anything that needs fixing. */
+function TabLead({ tab, member, config, options, issues }) {
+  const summary = TAB_SECTIONS[tab].map(section => sectionSummary(section, member, config, options)).join(t('clauseSep'))
+  if (!summary && !issues.length) return null
+  return <div className="rp-team-lead">
+    {summary ? <p className="rp-team-lead-summary"><span className="rp-team-eyebrow">{t('mtab.now')}</span>{summary}</p> : null}
+    {issues.length ? <ul className="rp-team-issues">{issues.map((issue, index) => <li key={`${issue.code}-${index}`} className={`is-${issue.level}`}>{t(`issue.${issue.code}`)}</li>)}</ul> : null}
+  </div>
 }

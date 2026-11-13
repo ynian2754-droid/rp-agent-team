@@ -1,7 +1,5 @@
-import { join } from 'node:path'
 import { buildAgentContext } from './context-policy.mjs'
-import { bridgeSettingFiles, makeSettingBranch, makeVariableBranch, projectConversationContext, setPointerValue } from './context-world-adapter.mjs'
-import { fingerprint, readOptionalJson, safeName, writeJsonAtomic } from './run-persistence.mjs'
+import { setPointerValue } from './context-world-adapter.mjs'
 import { describeStateToolAccess } from './state-store.mjs'
 
 /** Build the host context categories from a captured roleplay snapshot. */
@@ -10,7 +8,7 @@ export function projectAvailableSources(context, { currentInput, attachments = [
   const input = {
     text: currentInput ?? String(snapshot.currentUserInput ?? ''),
     attachments: attachments.map((part, index) => ({
-      index, type: part.type, name: part.name, mediaType: part.mediaType, id: part.attachment?.id
+      index, type: part.type, name: part.name ?? part.attachment?.name, mediaType: part.mediaType ?? part.attachment?.mediaType, id: part.attachment?.attachmentId ?? part.attachment?.id
     }))
   }
   return {
@@ -30,6 +28,20 @@ export function projectAgentContext(agent, availableSources, options = {}) {
   return buildAgentContext(agent, availableSources, options)
 }
 
+/** A metadata field selection must not implicitly grant the entire file. */
+export function selectedAgentAttachments(agent, attachments = []) {
+  const indexes = new Set()
+  for (const selection of agent.context.sources.filter(source => source.type === 'current_input')) {
+    if (selection.selector === undefined || selection.selector === '' || selection.selector === '/attachments') {
+      for (let index = 0; index < Math.min(selection.limit ?? attachments.length, attachments.length); index++) indexes.add(index)
+    } else {
+      const match = /^\/attachments\/(\d+)$/u.exec(selection.selector)
+      if (match && Number(match[1]) < attachments.length) indexes.add(Number(match[1]))
+    }
+  }
+  return attachments.filter((_part, index) => indexes.has(index))
+}
+
 export function conditionState(run, agent, stateStore) {
   const projected = {}
   for (const trigger of agent.triggers.filter(item => item.type === 'condition')) {
@@ -42,23 +54,6 @@ export function conditionState(run, agent, stateStore) {
     }
   }
   return projected
-}
-
-export function canReadNativeNamespace(agent, key) {
-  const rootPath = `/${key}`
-  if (!hasBroadPermission(agent, rootPath, 'read')) return false
-  return !agent.statePermissions.some(rule => rule.namespace === 'world'
-    && rule.path !== '' && rule.path !== rootPath && pathWithin(rootPath, rule.path)
-    && !['read', 'readwrite'].includes(rule.access))
-}
-
-export function canWriteNativeNamespace(agent, key) {
-  const rootPath = `/${key}`
-  if (!agent.outputAuthority.state || !canReadNativeNamespace(agent, key)
-    || !hasBroadPermission(agent, rootPath, 'write')) return false
-  return !agent.statePermissions.some(rule => rule.namespace === 'world'
-    && rule.path !== '' && rule.path !== rootPath && pathWithin(rootPath, rule.path)
-    && !['write', 'readwrite'].includes(rule.access))
 }
 
 export function authorizedWorldState(run, agent, stateStore) {
@@ -81,7 +76,7 @@ export function makeSources(run, conversation) {
   return projectAvailableSources(context, { currentInput: run.currentInput, attachments: run.attachments })
 }
 
-export function createChildContextData({ run, agent, activationNo, stateStore }) {
+export function createChildContextData({ run, agent, stateStore }) {
   const transaction = { conversationId: run.conversationId, runId: run.runId }
   const activationState = stateStore.snapshot(transaction)
   const activationVersions = stateStore.versionsSnapshot(transaction)
@@ -92,50 +87,8 @@ export function createChildContextData({ run, agent, activationNo, stateStore })
     scene_state: worldState.variables?.scene ?? {}
   }
   const agentContext = projectAgentContext(agent, sources, { messages: run.communication.allMessages(), drafts: run.drafts })
-  const attachmentSources = agent.context.sources.filter(source => source.type === 'current_input')
-  const includeAllAttachments = attachmentSources.some(source => source.selector === undefined || source.selector === '')
-  const attachmentCount = run.attachments.length
-  const allowedAttachmentIndexes = new Set(attachmentSources.flatMap(source => {
-    if (source.selector === '/attachments') {
-      const limit = source.limit ?? attachmentCount
-      return Array.from({ length: Math.min(limit, attachmentCount) }, (_unused, index) => index)
-    }
-    const match = /^\/attachments\/(\d+)(?:\/.*)?$/u.exec(source.selector ?? '')
-    const index = match ? Number(match[1]) : -1
-    return index >= 0 && index < attachmentCount ? [index] : []
-  }))
-  const attachments = run.attachments.flatMap((part, index) => includeAllAttachments || allowedAttachmentIndexes.has(index) ? [structuredClone(part)] : [])
-  const agentFileKey = `${safeName(agent.id)}-${fingerprint(agent.id).slice(0, 10)}`
-  const contextFile = join(run.dataDir, `context-${agentFileKey}-${activationNo}.json`)
-  const projected = projectConversationContext(run.rawConversationContext, agentContext)
-  const variableStateFile = join(run.dataDir, `variables-${agentFileKey}-${activationNo}.json`)
-  const settingStateFile = join(run.dataDir, `settings-${agentFileKey}-${activationNo}.json`)
-  const variableBridge = run.destinationSnapshot.variableBridge
-    ?? readOptionalJson(run.destinationSnapshot.variableStateFile, { enabled: false, state: {} })
-  const settingBridge = run.destinationSnapshot.settingBridge
-    ?? readOptionalJson(run.destinationSnapshot.settingStateFile, { enabled: false, library: {} })
-  // Native patch tools replace staged bridge trees, so only whole-subtree
-  // grants are safe there; exact path ACLs remain available through Team state tools.
-  const variableWritePaths = canWriteNativeNamespace(agent, 'variables') ? [''] : []
-  const settingWritePaths = canWriteNativeNamespace(agent, 'settings') ? [''] : []
-  writeJsonAtomic(variableStateFile, makeVariableBranch(
-    agent, activationState.world?.variables ?? {}, variableBridge, canReadNativeNamespace, projected.history, variableWritePaths
-  ))
-  writeJsonAtomic(settingStateFile, makeSettingBranch(
-    agent, activationState.world?.settings ?? {}, settingBridge, canReadNativeNamespace, projected.history,
-    worldState.variables ?? {}, settingWritePaths
-  ))
-  return { activationState, activationVersions, stateToolAccess, agentContext, attachments, contextFile, projected, variableStateFile, settingStateFile }
-}
-
-export function createRootContextFile(run, stateStore) {
-  const publisher = run.config.agents.find(agent => agent.id === run.outputAgentId)
-  const worldState = authorizedWorldState(run, publisher, stateStore)
-  const sources = { ...run.sources, hidden_state: worldState, long_memory: worldState, scene_state: worldState.variables?.scene ?? {} }
-  const agentContext = projectAgentContext(publisher, sources, { messages: [], drafts: run.drafts })
-  const path = join(run.dataDir, 'root-context.json')
-  writeJsonAtomic(path, projectConversationContext(run.rawConversationContext, agentContext))
-  return path
+  const attachments = structuredClone(selectedAgentAttachments(agent, run.attachments))
+  return { activationState, activationVersions, stateToolAccess, agentContext, attachments }
 }
 
 export function childPolicy(agent, run, activation, pendingChildren) {
@@ -156,6 +109,7 @@ export function childPolicy(agent, run, activation, pendingChildren) {
 
 function teamToolGuidance(agent, run, packet) {
   const lines = [`Team tools for ${agent.id}:`]
+  lines.push('Use rp_team_read_context({ source, path }) or rp_team_search_context({ source, query }) to inspect only your configured context. Read authorized file contents with rp_team_read_attachment({ index, offset }). Paths are relative to the filtered packet. ElecKoi native product tools and update_roleplay_plan are unavailable; do not use them. Write variables/settings through declared world state paths with rp_team_write_state, never host tools.')
   const targets = run.communication.targetsFor(agent.id)
   const stateToolAccess = packet?.stateToolAccess ?? []
   const hasDraftContext = packet?.agentContext?.categories?.includes('drafts') === true
@@ -206,6 +160,7 @@ function teamToolGuidance(agent, run, packet) {
   }
   if (writable.length) {
     lines.push(`Write only these declared paths with rp_team_write_state after reading the current version: ${writable.map(formatStatePath).join(', ')}. Include that expectedVersion and do not mutate product state directly.`)
+    lines.push('Remove a permitted object property with rp_team_remove_state({ namespace, path, expectedVersion }); whole namespaces and world setting files cannot be removed.')
   } else if (agent.outputAuthority.state) {
     lines.push('You have no state paths that can be safely replaced with rp_team_write_state.')
   }
@@ -239,13 +194,6 @@ export function childPrompt(agent, run, agentContext, activationNo, pendingChild
     childPolicy(agent, run, activationNo, pendingChildren),
     'Filtered context packet:', JSON.stringify(agentContext.sources, null, 2)
   ].join('\n\n') }]
-}
-
-function hasBroadPermission(agent, rootPath, action) {
-  return agent.statePermissions.some(rule => {
-    const can = action === 'read' ? rule.access === 'read' || rule.access === 'readwrite' : rule.access === 'write' || rule.access === 'readwrite'
-    return rule.namespace === 'world' && can && (rule.path === '' || rule.path === rootPath)
-  })
 }
 
 function pathWithin(parent, child) { return parent === '' || parent === child || child.startsWith(`${parent}/`) }

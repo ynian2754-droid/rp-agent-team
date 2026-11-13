@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { normalizeTeamConfig, teamError } from './schema.mjs'
+import { usesParameterInsertions } from './author-parameters.mjs'
 
 const AGENT_PORT = '@rp-team-agent-port:'
 const STATE_PORT = '@rp-team-state-port:'
@@ -170,7 +171,7 @@ export function exportComponent(config, agentIds, name) {
   const component = {
     format: 'rp-team-component-v1',
     name: requiredText(name, 'component name'),
-    dependencies: { minimumPluginVersion: requires040(normalized) ? '0.4.0' : '0.3.0' },
+    dependencies: { minimumPluginVersion: usesParameterInsertions(componentParameters) ? '0.7.0' : requires040(normalized) ? '0.4.0' : '0.3.0' },
     agents: componentAgents,
     state: { definitions: stateDefinitions },
     publisher: { portId: publisherPortId, suggestedAgentRef: outputRef },

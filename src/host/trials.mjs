@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { tmpdir } from 'node:os'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { normalizeTeamConfig, teamError } from '../shared/schema.mjs'
 import { resolveAuthorParameters } from '../shared/author-parameters.mjs'
@@ -9,14 +8,15 @@ import { traceAssociation } from './execution-trace.mjs'
 import { readRunRows } from './run-persistence.mjs'
 import { trialVariantStorageKey } from './trial-worker.mjs'
 import { runTrialWorkerProcess } from './trial-worker-client.mjs'
+import { TrialStorage } from './trial-storage.mjs'
+import { captureTrialDependencies, freezeTrialData, validateFrozenTrialData } from './trial-frozen-data.mjs'
 import { fileURLToPath } from 'node:url'
 
-const DOCUMENT_VERSION = 1
 const LIVE_STATUSES = new Set(['queued', 'running', 'cancelling'])
 const TERMINAL_STATUSES = new Set(['complete', 'failed', 'cancelled', 'interrupted'])
 const SECRET_KEYS = new Set(['apikey', 'apitoken', 'token', 'credential', 'credentialref', 'secret', 'password', 'authorization', 'bearer', 'accesstoken', 'refreshtoken'])
 
-/** Host-side durable scenario/trial API. Frozen source material stays in private snapshot files. */
+/** Host-side durable scenario/trial API. Frozen source material is a plugin-owned public DSH archive. */
 export function createTrialApi({
   ctx,
   store,
@@ -27,29 +27,52 @@ export function createTrialApi({
   readState,
   getOptions,
   workerFactory = runTrialWorkerProcess,
+  recoveryFactory,
 }) {
+  const recoveryWorkerFactory = recoveryFactory ?? (workerFactory === runTrialWorkerProcess ? runTrialWorkerProcess : undefined)
   const storage = new TrialStorage(store?.path, process.env.DSH_HOME)
   const activeWorkers = new Map()
   const launchingWorkers = new Map()
+  const recoveryTasks = new Map()
   let shuttingDown = false
-  const starting = Promise.resolve(recoveryReady).then(() => {
+  const starting = Promise.resolve(recoveryReady).then(async () => {
     const document = storage.read()
     let changed = false
     for (const trial of Object.values(document.trials)) {
-      if (!LIVE_STATUSES.has(trial.status)) continue
-      reconcileIsolatedUsage(trial, storage, { includeUnreportedElapsed: false })
-      trial.status = 'interrupted'
-      trial.updatedAt = new Date().toISOString()
-      trial.failure = 'The isolated worker stopped before the trial completed. Explicit retry resumes from the last committed checkpoint.'
-      trial.failureCode = 'RP_TEAM_TRIAL_WORKER_INTERRUPTED'
-      for (const variant of trial.variants) if (LIVE_STATUSES.has(variant.status)) variant.status = 'interrupted'
-      for (const variant of trial.variants) for (const attempt of variant.attempts ?? []) {
-        if (attempt.status === 'running') attempt.status = 'interrupted'
+      const recovered = reconcileDurableWorkerState(trial, storage)
+      changed ||= recovered
+      if (LIVE_STATUSES.has(trial.status)) {
+        reconcileIsolatedUsage(trial, storage, { includeUnreportedElapsed: false })
+        trial.status = allVariantsComplete(trial) ? 'complete' : 'interrupted'
+        trial.updatedAt = new Date().toISOString()
+        const unknownResult = hasUnknownResult(trial)
+        trial.failure = trial.status === 'complete' ? undefined
+          : unknownResult ? 'A worker result has no committed checkpoint and needs confirmation before retry.'
+            : 'The isolated worker stopped before the trial completed. Explicit retry resumes from the last committed checkpoint.'
+        trial.failureCode = trial.status === 'complete' ? undefined
+          : unknownResult ? 'RP_TEAM_TRIAL_RESULT_UNKNOWN' : 'RP_TEAM_TRIAL_WORKER_INTERRUPTED'
+        for (const variant of trial.variants) {
+          variant.status = variant.turns.length >= trial.scenario.steps.length ? 'complete' : 'interrupted'
+          for (const attempt of variant.attempts ?? []) if ((attempt.status === 'running' || attempt.status === 'interrupted')
+            && !knownUncommittedOutcome(attempt.commitOutcome)) {
+            attempt.status = 'needs_confirmation'
+          }
+        }
+        clearWorkerClock(trial)
+        changed = true
+      } else if (recovered) {
+        trial.updatedAt = new Date().toISOString()
+        if (allVariantsComplete(trial)) {
+          trial.status = 'complete'
+          trial.failure = undefined
+          trial.failureCode = undefined
+          for (const variant of trial.variants) variant.status = 'complete'
+          clearWorkerClock(trial)
+        }
       }
-      clearWorkerClock(trial)
-      changed = true
     }
     if (changed) storage.write(document)
+    await recoverUnknownTrialAttempts()
   })
 
   async function listTrialScenarios() {
@@ -120,7 +143,7 @@ export function createTrialApi({
     }
     const scenario = normalizeScenario(imported?.scenario ?? imported)
     if (imported?.snapshot) {
-      const snapshot = validatePrivateSnapshot(imported.snapshot)
+      const snapshot = validateTrialSnapshot(imported.snapshot)
       snapshot.snapshotId = snapshot.snapshotId || createSnapshotId(snapshot)
       storage.writeSnapshot(snapshot.snapshotId, snapshot)
       scenario.snapshotId = snapshot.snapshotId
@@ -137,19 +160,18 @@ export function createTrialApi({
     await starting
     const id = requiredText(conversationId, 'conversationId')
     if (await isConversationBusy(id)) throw teamError('RP_TEAM_TRIAL_SOURCE_BUSY', 'Wait for the selected conversation to finish before freezing a trial snapshot.')
-    const frozen = await ctx.eleckoiTrialSnapshots.freeze({ conversationId: id })
     const config = store.get(id)
+    const nativePresetIds = (config.config?.agents ?? []).map(agent => agent.presetId).filter(Boolean)
+    const frozen = await freezeTrialData(ctx, { conversationId: id, nativePresetIds })
     const teamState = stateStore.committedSnapshot({ conversationId: id })
     const sourceState = readState ? await readState({ conversationId: id }) : undefined
-    const options = getOptions ? await getOptions({ conversationId: id }) : undefined
-    const snapshot = validatePrivateSnapshot({
-      ...frozen.privateSnapshot,
+    const snapshot = validateTrialSnapshot({
+      ...frozen,
       teamState,
       sourceConfig: config.config,
       sourceParameterValues: config.parameterValues ?? {},
       sourceConfigEnabled: config.enabled === true,
       sourceState,
-      sourceOptions: options,
     })
     snapshot.snapshotId = createSnapshotId(snapshot)
     storage.writeSnapshot(snapshot.snapshotId, snapshot)
@@ -157,7 +179,10 @@ export function createTrialApi({
       snapshotId: snapshot.snapshotId,
       conversationId: id,
       createdAt: frozen.createdAt,
-      summary: structuredClone(frozen.summary),
+      summary: {
+        title: frozen.details.conversation.title ?? '',
+        messageCount: frozen.details.messages.length,
+      },
     }
   }
 
@@ -178,19 +203,10 @@ export function createTrialApi({
         .filter(agent => agent.modelRef !== 'inherit')
         .map(agent => agent.modelRef.provider)),
     ].filter(value => typeof value === 'string' && value))
-    const agentPresetIds = [...new Set(resolvedVariants.flatMap(config => config.agents
+    const nativePresetIds = [...new Set(resolvedVariants.flatMap(config => config.agents
       .map(agent => agent.presetId).filter(Boolean)))]
-    const [capturedRoutes, referencedPresets] = await Promise.all([
-      ctx.eleckoiTrialSnapshots.captureModelProviders({ providerIds: [...modelRoutes] }),
-      ctx.eleckoiTrialSnapshots.captureAgentPresets({ presetIds: agentPresetIds }),
-    ])
-    const routes = new Map((snapshot.modelProviders ?? (snapshot.modelProvider ? [snapshot.modelProvider] : []))
-      .map(item => [item.provider, item]))
-    for (const route of capturedRoutes) routes.set(route.provider, route)
-    snapshot = validatePrivateSnapshot({
-      ...snapshot,
-      modelProviders: [...routes.values()],
-      referencedPresets: mergePresetDefinitions(snapshot.referencedPresets ?? [], referencedPresets),
+    snapshot = await captureTrialDependencies(ctx, snapshot, {
+      providerIds: [...modelRoutes], nativePresetIds,
     })
     snapshot.snapshotId = createSnapshotId(snapshot)
     storage.writeSnapshot(snapshot.snapshotId, snapshot)
@@ -282,6 +298,17 @@ export function createTrialApi({
     await starting
     const id = requiredText(trialId, 'trialId')
     const retryOperationId = requiredText(operationId, 'operationId')
+    await recoverUnknownTrialAttempts(id)
+    updateTrial(id, record => {
+      reconcileDurableWorkerState(record, storage)
+      if (allVariantsComplete(record)) {
+        record.status = 'complete'
+        record.failure = undefined
+        record.failureCode = undefined
+        for (const variant of record.variants) variant.status = 'complete'
+        clearWorkerClock(record)
+      }
+    })
     const trial = requireTrial(id)
     const retryOperationIds = trial.retryOperationIds ?? (trial.retryOperationId ? [trial.retryOperationId] : [])
     if (retryOperationIds.includes(retryOperationId)) {
@@ -289,6 +316,10 @@ export function createTrialApi({
     }
     if (!['interrupted', 'failed', 'cancelled'].includes(trial.status)) {
       throw teamError('RP_TEAM_TRIAL_NOT_RETRYABLE', `Trial ${id} cannot be retried from ${trial.status}.`)
+    }
+    if (trial.recoveryBlocked || trial.variants.some(variant =>
+      (variant.attempts ?? []).some(attempt => attempt.status === 'needs_confirmation'))) {
+      throw teamError('RP_TEAM_TRIAL_RESULT_UNKNOWN', 'A trial turn has no durable committed checkpoint. Confirm its product receipt before retrying so the model is not called twice.')
     }
     if (Object.values(storage.read().trials).some(row => row.trialId !== id && LIVE_STATUSES.has(row.status))) {
       throw teamError('RP_TEAM_TRIAL_BUSY', 'Another isolated trial task is active in this profile.')
@@ -402,7 +433,11 @@ export function createTrialApi({
     const workerCredentials = await resolveWorkerCredentials(ctx, snapshot)
     if (shuttingDown || !LIVE_STATUSES.has(requireTrial(id).status)) return
     const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+    const hostBootstrap = workerFactory === runTrialWorkerProcess ? await resolveTrialHostBootstrap() : undefined
+    // dispose() may have run while the bootstrap was resolving; a worker started now would never be cancelled.
+    if (shuttingDown || !LIVE_STATUSES.has(requireTrial(id).status)) return
     const workerStartedAt = Date.now()
+    const generation = workerGeneration(record)
     const worker = workerFactory({
       trialId: id,
       conversationId: record.conversationId,
@@ -413,14 +448,15 @@ export function createTrialApi({
       budget: structuredClone(record.budget),
       usage: structuredClone(record.usage),
       allowTrustedTools: record.allowTrustedTools,
+      workerGeneration: generation,
+      ...(hostBootstrap ?? {}),
       snapshot,
       snapshots: Object.fromEntries(record.variants.map(item => [item.id, storage.readSnapshot(item.checkpointSnapshotId)])),
       getRunRecords,
-      sourceProfileDir: process.env.DSH_HOME ? join(process.env.DSH_HOME, 'profiles', 'desktop') : undefined,
-      hostRoot: ctx.eleckoiTrialSnapshots.getHostRoot(),
       pluginRoot,
       workerCredentials,
-      workerRoot: storage.workerRoot(id),
+      workerRoot: storage.workerRoot(id, generation),
+      workerCheckpointRoot: storage.durableWorkerRoot,
       onProgress: event => handleProgress(id, event),
     })
     updateTrial(id, value => {
@@ -436,6 +472,107 @@ export function createTrialApi({
     ).finally(() => { if (activeWorkers.get(id) === worker) activeWorkers.delete(id) })
   }
 
+  async function resolveTrialHostBootstrap() {
+    const desktopHostUrl = process.env.ELECKOI_DESKTOP_HOST_MODULE_URL
+    if (typeof desktopHostUrl !== 'string' || !desktopHostUrl.startsWith('file:')) {
+      throw new Error('The official desktop-host did not provide its public ESM module URL to the plugin worker.')
+    }
+    const desktopHost = await import(desktopHostUrl)
+    if (typeof desktopHost.resolveDshDesktopResources !== 'function') {
+      throw new Error('The official desktop-host package does not expose its DSH resource resolver.')
+    }
+    const resources = desktopHost.resolveDshDesktopResources()
+    if (resources.hostModuleUrl !== desktopHostUrl) throw new Error('The official desktop-host resource descriptor resolved a different public module URL.')
+    return { desktopHostUrl: resources.hostModuleUrl, resources }
+  }
+
+  async function recoverUnknownTrialAttempts(selectedTrialId) {
+    if (!recoveryWorkerFactory || shuttingDown) return
+    const ids = selectedTrialId ? [selectedTrialId] : Object.keys(storage.read().trials)
+    for (const id of ids) {
+      let task = recoveryTasks.get(id)
+      if (!task) {
+        task = recoverUnknownTrialAttemptsForTrial(id)
+        recoveryTasks.set(id, task)
+      }
+      try { await task }
+      finally { if (recoveryTasks.get(id) === task) recoveryTasks.delete(id) }
+    }
+  }
+
+  async function recoverUnknownTrialAttemptsForTrial(id) {
+    let hostBootstrap
+    const initial = storage.read().trials[id]
+    if (!initial) return
+    for (const initialVariant of initial.variants) {
+      for (const initialAttempt of initialVariant.attempts ?? []) {
+          const document = storage.read()
+          const record = document.trials[id]
+          const variant = record?.variants.find(item => item.id === initialVariant.id)
+          const attempt = variant?.attempts?.find(item => item.attemptId === initialAttempt.attemptId)
+          if (!record || !variant || !attempt || attempt.status !== 'needs_confirmation') continue
+          reconcileDurableWorkerState(record, storage)
+          reconcileIsolatedUsage(record, storage, { includeUnreportedElapsed: false })
+          storage.write(document)
+          const currentVariant = record.variants.find(item => item.id === initialVariant.id)
+          const currentAttempt = currentVariant?.attempts?.find(item => item.attemptId === initialAttempt.attemptId)
+          if (!currentVariant || currentAttempt?.status !== 'needs_confirmation'
+            || !Number.isSafeInteger(currentAttempt.workerGeneration)
+            || typeof currentAttempt.sessionId !== 'string' || typeof currentAttempt.conversationId !== 'string'
+            || !Number.isSafeInteger(currentAttempt.afterSeq) || typeof currentAttempt.attemptId !== 'string') continue
+          const snapshotId = currentVariant.checkpointSnapshotId ?? record.snapshotId
+          const snapshot = storage.readSnapshot(snapshotId)
+          if (!snapshot) continue
+          if (recoveryWorkerFactory === runTrialWorkerProcess && !hostBootstrap) {
+            try { hostBootstrap = await resolveTrialHostBootstrap() }
+            catch { continue }
+          }
+          const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+          let worker
+          try {
+            worker = recoveryWorkerFactory({
+              recoveryOnly: true,
+              trialId: id,
+              variant: structuredClone(currentVariant),
+              attempt: structuredClone(currentAttempt),
+              scenario: structuredClone(record.scenario),
+              budget: structuredClone(record.budget),
+              usage: structuredClone(record.usage),
+              allowTrustedTools: record.allowTrustedTools === true,
+              snapshot,
+              workerRoot: storage.workerRoot(id, currentAttempt.workerGeneration),
+              workerCheckpointRoot: storage.durableWorkerRoot,
+              pluginRoot,
+              workerCredentials: {},
+              ...(hostBootstrap ?? {}),
+            })
+            await worker.done
+          } catch {
+            continue
+          }
+          updateTrial(id, current => {
+            reconcileDurableWorkerState(current, storage)
+            if (allVariantsComplete(current)) {
+              current.status = 'complete'
+              current.failure = undefined
+              current.failureCode = undefined
+              for (const item of current.variants) item.status = 'complete'
+              clearWorkerClock(current)
+            } else if (hasUnknownResult(current)) {
+              current.status = 'interrupted'
+              current.failureCode = 'RP_TEAM_TRIAL_RESULT_UNKNOWN'
+              current.failure = 'A worker result has no committed checkpoint and needs confirmation before retry.'
+            } else if (!LIVE_STATUSES.has(current.status)) {
+              current.status = 'interrupted'
+              current.failureCode = 'RP_TEAM_TRIAL_WORKER_INTERRUPTED'
+              current.failure = 'The isolated worker stopped. Retry resumes from the last committed checkpoint.'
+            }
+            current.updatedAt = new Date().toISOString()
+          })
+      }
+    }
+  }
+
   function handleProgress(trialId, event) {
     updateTrial(trialId, record => {
       if (event.type === 'trial:started') record.status = 'running'
@@ -444,6 +581,7 @@ export function createTrialApi({
         variant.status = 'running'
         variant.nativeConversationId = event.conversationId
         variant.sessionId = event.sessionId
+        if (Number.isSafeInteger(event.workerGeneration)) variant.workerGeneration = event.workerGeneration
         if (event.parameterResolution) variant.parameterResolution = scrubCredentials(event.parameterResolution)
       } else if (event.type === 'turn:attempt-started') {
         const variant = findVariant(record, event.variantId)
@@ -451,6 +589,19 @@ export function createTrialApi({
         variant.attempts ??= []
         variant.attempts = variant.attempts.filter(item => item.attemptId !== attempt.attemptId)
         variant.attempts.push(attempt)
+      } else if (event.type === 'turn:receipt-verified') {
+        const variant = findVariant(record, event.variantId)
+        const attempt = (variant.attempts ?? []).find(item => item.attemptId === event.attemptId)
+        if (attempt && event.conversationId === attempt.conversationId && event.sessionId === attempt.sessionId
+          && typeof event.runId === 'string' && event.runId) {
+          attempt.runId = event.runId
+          attempt.nativeTurn = event.nativeTurn
+          attempt.commitIdentity = {
+            conversationId: event.conversationId, rootSessionId: event.rootSessionId,
+            runId: event.runId, turn: event.nativeTurn, inputMessageId: event.inputMessageId,
+            productCommitStaged: true,
+          }
+        }
       } else if (event.type === 'turn:attempt-progress') {
         const variant = findVariant(record, event.variantId)
         const attempt = (variant.attempts ?? []).find(item => item.attemptId === event.attemptId)
@@ -466,27 +617,21 @@ export function createTrialApi({
         const variant = findVariant(record, event.variantId)
         variant.attempts ??= []
         const attempt = structuredClone(event.attempt)
+        if (!['failed', 'cancelled'].includes(attempt.commitOutcome)) attempt.status = 'needs_confirmation'
         variant.attempts = variant.attempts.filter(item => item.attemptId !== attempt.attemptId)
         variant.attempts.push(attempt)
         if (event.taskUsage) applyTaskUsage(record, event.taskUsage)
       } else if (event.type === 'turn:completed') {
         const variant = findVariant(record, event.variantId)
-        if (event.turn.attemptId) variant.attempts = (variant.attempts ?? []).filter(item => item.attemptId !== event.turn.attemptId)
-        variant.turns = variant.turns.filter(turn => turn.turn !== event.turn.turn)
-        variant.turns.push(structuredClone(event.turn))
-        variant.turns.sort((left, right) => left.turn - right.turn)
-        if (event.checkpoint) {
-          const snapshot = validatePrivateSnapshot(event.checkpoint)
-          const checkpointId = snapshot.snapshotId || createSnapshotId(snapshot)
-          snapshot.snapshotId = checkpointId
-          storage.writeSnapshot(checkpointId, snapshot)
-          variant.checkpointSnapshotId = checkpointId
-        }
-        if (event.turn.taskUsage) applyTaskUsage(record, event.turn.taskUsage)
-        else {
-          record.usage.requests += Number(event.turn.usage?.requests ?? 0)
-          record.usage.reportedTokens += Number(event.turn.usage?.reportedTokens ?? 0)
-          record.usage.elapsedMs += Number(event.turn.elapsedMs ?? 0)
+        const ack = storage.readWorkerCheckpoints(trialId, event.variantId)
+          .find(row => row.turn === event.turn?.turn)
+        if (!ack || ack.invalid || !validDurableCheckpoint(ack.value, trialId, event.variantId)
+          || ack.value.turn.turn !== event.turn.turn || ack.value.turn.runId !== event.turn.runId) {
+          record.recoveryBlocked = 'A turn-completed acknowledgement did not match its durable committed checkpoint.'
+          const attempt = (variant.attempts ?? []).find(item => item.attemptId === event.turn?.attemptId)
+          if (attempt) attempt.status = 'needs_confirmation'
+        } else {
+          applyDurableCheckpoint(record, variant, ack.value, storage)
         }
       } else if (event.type === 'variant:completed') findVariant(record, event.variantId).status = 'complete'
       else if (event.type === 'trial:completed') {
@@ -515,16 +660,31 @@ export function createTrialApi({
 
   async function settleWorker(trialId, error) {
     updateTrial(trialId, record => {
+      reconcileDurableWorkerState(record, storage)
       reconcileIsolatedUsage(record, storage)
-      if (!TERMINAL_STATUSES.has(record.status)) {
-        record.status = record.status === 'cancelling' ? 'cancelled' : 'interrupted'
+      if (error) record.workerExitDiagnostic = redactMessage(error.message ?? String(error)).slice(-4096)
+      if (allVariantsComplete(record)) {
+        record.status = 'complete'
+        record.failure = undefined
+        record.failureCode = undefined
+        for (const variant of record.variants) variant.status = 'complete'
+        clearWorkerClock(record)
+      } else if (!TERMINAL_STATUSES.has(record.status)) {
+        record.status = record.status === 'cancelling' && !hasUnknownResult(record) ? 'cancelled' : 'interrupted'
         record.failureCode = error ? 'RP_TEAM_TRIAL_WORKER_INTERRUPTED' : record.failureCode
-        for (const variant of record.variants) if (LIVE_STATUSES.has(variant.status)) variant.status = record.status
+        for (const variant of record.variants) {
+          if (LIVE_STATUSES.has(variant.status)) variant.status = variant.turns.length >= record.scenario.steps.length ? 'complete' : record.status
+        }
         for (const variant of record.variants) for (const attempt of variant.attempts ?? []) {
-          if (attempt.status === 'running') attempt.status = record.status
+          if ((attempt.status === 'running' || attempt.status === 'interrupted')
+            && !knownUncommittedOutcome(attempt.commitOutcome)) attempt.status = 'needs_confirmation'
         }
         if (error) record.failure = redactMessage(error.message ?? String(error))
         else record.failure ??= 'The worker exited without a terminal trial result.'
+      }
+      if (hasUnknownResult(record) && record.status !== 'complete') {
+        record.failureCode = 'RP_TEAM_TRIAL_RESULT_UNKNOWN'
+        record.failure = 'A worker result has no committed checkpoint and needs confirmation before retry.'
       }
       clearWorkerClock(record)
       record.updatedAt = new Date().toISOString()
@@ -581,58 +741,6 @@ export function createTrialApi({
     const variant = record.variants.find(item => item.id === id)
     if (!variant) throw new Error(`Worker reported unknown trial variant ${id}.`)
     return variant
-  }
-}
-
-class TrialStorage {
-  constructor(storePath, home) {
-    const base = storePath ? dirname(storePath) : home ? join(home, 'plugins', 'rp-agent-team') : undefined
-    if (!base) throw new Error('DSH_HOME or RP Team config storage is required for trial storage.')
-    this.root = join(base, 'trials')
-    this.path = join(this.root, 'trials.json')
-    this.snapshotRoot = join(this.root, 'snapshots')
-    // Native package managers create deep trees; keep Windows worker paths short.
-    // Durable results and retry checkpoints remain in the plugin's own store.
-    this.workerRoot = trialId => join(tmpdir(), 'rpt', hash(this.root).slice(0, 12), hash(trialId).slice(0, 12))
-  }
-
-  read() {
-    try {
-      const value = JSON.parse(readFileSync(this.path, 'utf8'))
-      if (value?.version !== DOCUMENT_VERSION || !isRecord(value.scenarios) || !isRecord(value.trials)) {
-        throw teamError('RP_TEAM_TRIAL_STORE_INVALID', 'Trial storage has an unsupported format.')
-      }
-      return value
-    } catch (error) {
-      if (error?.code === 'ENOENT') return { version: DOCUMENT_VERSION, scenarios: {}, trials: {} }
-      throw error
-    }
-  }
-
-  write(document) {
-    mkdirSync(this.root, { recursive: true })
-    const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`
-    try { writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' }); renameSync(temporary, this.path) }
-    finally { rmSync(temporary, { force: true }) }
-  }
-
-  writeSnapshot(snapshotId, value) {
-    mkdirSync(this.snapshotRoot, { recursive: true })
-    const path = this.snapshotPath(snapshotId)
-    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
-    try { writeFileSync(temporary, `${JSON.stringify(value)}\n`, { encoding: 'utf8', flag: 'wx' }); renameSync(temporary, path) }
-    finally { rmSync(temporary, { force: true }) }
-  }
-
-  readSnapshot(snapshotId) {
-    try { return JSON.parse(readFileSync(this.snapshotPath(snapshotId), 'utf8')) }
-    catch (error) { if (error?.code === 'ENOENT') return undefined; throw error }
-  }
-
-  snapshotPath(snapshotId) {
-    const id = requiredText(snapshotId, 'snapshotId')
-    if (!/^trial-snapshot-[a-f0-9]{32}$/u.test(id)) throw teamError('RP_TEAM_TRIAL_SNAPSHOT_INVALID', 'Invalid trial snapshot id.')
-    return join(this.snapshotRoot, `${id}.json`)
   }
 }
 
@@ -748,6 +856,7 @@ function publicTrial(record) {
     usage: structuredClone(record.usage),
     ...(record.failure ? { failure: redactMessage(record.failure) } : {}),
     ...(record.failureCode ? { failureCode: record.failureCode } : {}),
+    ...(record.workerExitDiagnostic ? { workerExitDiagnostic: redactMessage(record.workerExitDiagnostic) } : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   }
@@ -758,6 +867,7 @@ function publicAttempt(value) {
   return {
     attemptId: value.attemptId,
     turn: value.turn,
+    ...(Number.isSafeInteger(value.nativeTurn) ? { nativeTurn: value.nativeTurn } : {}),
     inputText: scrubText(value.inputText ?? ''),
     status: value.status,
     ...(value.runId ? { runId: value.runId } : {}),
@@ -791,28 +901,39 @@ function clearWorkerClock(record) {
 function reconcileIsolatedUsage(record, storage, { includeUnreportedElapsed = true } = {}) {
   const runsById = new Map()
   for (const variant of record.variants) {
-    const runtimeRoot = join(storage.workerRoot(record.trialId), trialVariantStorageKey(variant.id), 'userdata', 'runtime')
-    const traceRoot = join(runtimeRoot, 'home', 'plugins', 'rp-agent-team', 'traces')
-    const sessionRoot = join(runtimeRoot, 'sessions')
     const evidence = [...variant.turns, ...(variant.attempts ?? [])]
     const conversations = new Set([variant.nativeConversationId, ...evidence.map(item => item.conversationId)].filter(Boolean))
-    for (const conversationId of conversations) {
-      for (const row of readRunRows(traceRoot, conversationId)) {
-        const runId = row.status?.runId
-        if (runId) runsById.set(runId, { row, traceRoot, sessionRoot })
+    for (let generation = 0; generation <= workerGeneration(record); generation += 1) {
+      const runtimeRoot = join(storage.workerRoot(record.trialId, generation), trialVariantStorageKey(variant.id), 'userdata', 'runtime')
+      const traceRoot = join(runtimeRoot, 'home', 'plugins', 'rp-agent-team', 'traces')
+      const sessionRoot = join(runtimeRoot, 'sessions')
+      for (const conversationId of conversations) {
+        for (const row of readRunRows(traceRoot, conversationId)) {
+          const runId = row.status?.runId
+          if (runId) runsById.set(runId, { row, traceRoot, sessionRoot })
+        }
       }
     }
     for (const item of evidence) {
       if (item.sessionId) {
-        const events = readSessionEvents(sessionRoot, item.sessionId)
+        const generation = Number.isSafeInteger(item.workerGeneration) ? item.workerGeneration
+          : Number.isSafeInteger(variant.workerGeneration) ? variant.workerGeneration : 0
+        const runtimeRoot = join(storage.workerRoot(record.trialId, generation), trialVariantStorageKey(variant.id), 'userdata', 'runtime')
+        const events = readSessionEvents(join(runtimeRoot, 'sessions'), item.sessionId)
         if (events.length > (item.nativeEvents?.length ?? 0)) item.nativeEvents = events
       }
     }
     for (const attempt of variant.attempts ?? []) {
       if (!attempt.sessionId || !attempt.conversationId) continue
-      const row = [...runsById.values()].map(value => value.row).find(candidate =>
-        candidate.status?.rootSessionId === attempt.sessionId && candidate.status?.turn === attempt.turn)
-      if (!row) continue
+      const inputMessageId = attemptInputMessageId(attempt)
+      const matched = [...runsById.values()].find(({ row }) => {
+        const status = row.status ?? {}
+        return status.rootSessionId === attempt.sessionId
+          && (inputMessageId ? status.inputMessageId === inputMessageId
+            : Number.isSafeInteger(attempt.nativeTurn) && status.turn === attempt.nativeTurn)
+      })
+      if (!matched) continue
+      const { row, sessionRoot } = matched
       const trace = {
         ...row.status,
         ...traceAssociation(row),
@@ -820,6 +941,7 @@ function reconcileIsolatedUsage(record, storage, { includeUnreportedElapsed = tr
         events: structuredClone(row.trace?.events ?? []),
       }
       attempt.runId = row.status.runId
+      if (Number.isSafeInteger(row.status.turn)) attempt.nativeTurn = row.status.turn
       attempt.trajectory = { run: trace, executions: readExecutionEvents(row, sessionRoot) }
     }
   }
@@ -894,6 +1016,8 @@ function publicTurn(value) {
   return {
     runId: value.runId,
     turn: value.turn,
+    ...(Number.isSafeInteger(value.nativeTurn ?? value.commitReceipt?.turn)
+      ? { nativeTurn: value.nativeTurn ?? value.commitReceipt.turn } : {}),
     inputText: scrubText(value.inputText ?? ''),
     body: scrubText(value.body ?? ''),
     assertions: scrubCredentials(value.assertions ?? []),
@@ -907,12 +1031,135 @@ function publicTurn(value) {
   }
 }
 
-function validatePrivateSnapshot(value) {
-  if (!isRecord(value) || value.format !== 'eleckoi.rp-team-trial-snapshot' || value.version !== 1
-    || typeof value.conversationId !== 'string' || !isRecord(value.archive) || !isRecord(value.character)) {
-    throw teamError('RP_TEAM_TRIAL_SNAPSHOT_INVALID', 'The native private trial snapshot is incomplete.')
+function validateTrialSnapshot(value) {
+  if (!isRecord(value)) throw teamError('RP_TEAM_TRIAL_SNAPSHOT_INVALID', 'The trial snapshot is incomplete.')
+  return validateFrozenTrialData(value)
+}
+
+function reconcileDurableWorkerState(record, storage) {
+  let changed = false
+  const recoveryIssues = []
+  for (const variant of record.variants) {
+    variant.turns ??= []
+    variant.attempts ??= []
+    const checkpointRows = storage.readWorkerCheckpoints(record.trialId, variant.id)
+      .sort((left, right) => (left.turn ?? 0) - (right.turn ?? 0))
+    const committedAttemptIds = new Set()
+    for (const row of checkpointRows) {
+      if (row.invalid || !validDurableCheckpoint(row.value, record.trialId, variant.id)) {
+        recoveryIssues.push(`${variant.id}:invalid checkpoint ${row.name}`)
+        continue
+      }
+      const uncertainAttempt = variant.attempts.find(attempt => attempt.turn === row.value.turn.turn
+        && attempt.status === 'needs_confirmation')
+      if (uncertainAttempt && !checkpointMatchesAttempt(row.value, uncertainAttempt)) {
+        recoveryIssues.push(`${variant.id}:checkpoint identity conflicts with uncertain attempt ${uncertainAttempt.attemptId}`)
+        continue
+      }
+      committedAttemptIds.add(row.value.turn.attemptId)
+      try { changed = applyDurableCheckpoint(record, variant, row.value, storage) || changed }
+      catch (error) { recoveryIssues.push(`${variant.id}:invalid checkpoint ${row.name} (${safeReason(error)})`) }
+    }
+
+    for (const row of storage.readWorkerAttempts(record.trialId, variant.id)) {
+      if (row.invalid) {
+        recoveryIssues.push(`${variant.id}:invalid attempt marker ${row.name}`)
+        continue
+      }
+      const attempt = row.attempt
+      if (!attempt || committedAttemptIds.has(attempt.attemptId)) continue
+      const known = row.stage === 'settled' && knownUncommittedOutcome(attempt.commitOutcome)
+      const recoveredAttempt = { ...structuredClone(attempt), status: known ? attempt.status : 'needs_confirmation' }
+      const priorIndex = variant.attempts.findIndex(item => item.attemptId === attempt.attemptId)
+      if (priorIndex < 0) variant.attempts.push(recoveredAttempt)
+      else variant.attempts[priorIndex] = { ...variant.attempts[priorIndex], ...recoveredAttempt }
+      changed = true
+    }
+    for (const attempt of variant.attempts) {
+      if ((attempt.status === 'running' || attempt.status === 'interrupted')
+        && !knownUncommittedOutcome(attempt.commitOutcome)) {
+        attempt.status = 'needs_confirmation'
+        changed = true
+      }
+    }
   }
-  return structuredClone(value)
+  const issue = recoveryIssues.length ? recoveryIssues.join('; ') : undefined
+  if (record.recoveryBlocked !== issue) {
+    record.recoveryBlocked = issue
+    changed = true
+  }
+  return changed
+}
+
+function validDurableCheckpoint(value, trialId, variantId) {
+  const receipt = value?.receipt
+  const turn = value?.turn
+  return value?.format === 'rp-team.trial-worker-checkpoint' && value.version === 1
+    && value.trialId === trialId && value.variantId === variantId
+    && receipt?.outcome === 'committed' && receipt.active === true
+    && typeof receipt.conversationId === 'string' && typeof receipt.sessionId === 'string'
+    && typeof receipt.runId === 'string' && Number.isSafeInteger(receipt.turn)
+    && turn?.runId === receipt.runId && Number.isSafeInteger(turn.turn) && turn.turn > 0
+    && (turn.nativeTurn ?? turn.commitReceipt?.turn) === receipt.turn
+    && turn.conversationId === receipt.conversationId && turn.sessionId === receipt.sessionId
+    && turn.commitReceipt?.outcome === 'committed' && turn.commitReceipt.active === true
+    && turn.commitReceipt.runId === receipt.runId && turn.commitReceipt.conversationId === receipt.conversationId
+    && turn.commitReceipt.sessionId === receipt.sessionId && turn.commitReceipt.turn === receipt.turn
+    && isRecord(value.checkpoint)
+}
+
+function checkpointMatchesAttempt(checkpoint, attempt) {
+  const receipt = checkpoint.receipt
+  const expectedInputMessageId = attemptInputMessageId(attempt)
+  return checkpoint.turn.attemptId === attempt.attemptId
+    && receipt.conversationId === attempt.conversationId
+    && receipt.sessionId === attempt.sessionId
+    && (!attempt.runId || receipt.runId === attempt.runId)
+    && (!Number.isSafeInteger(attempt.nativeTurn) || receipt.turn === attempt.nativeTurn)
+    && (!expectedInputMessageId || receipt.inputMessageId === expectedInputMessageId)
+}
+
+function applyDurableCheckpoint(record, variant, ack, storage) {
+  if (!validDurableCheckpoint(ack, record.trialId, variant.id)) return false
+  const turn = structuredClone(ack.turn)
+  const prior = variant.turns.find(item => item.turn === turn.turn)
+  if (prior) {
+    if (prior.runId !== turn.runId) throw new Error(`turn ${turn.turn} already has a different committed run`)
+    if (!prior.commitReceipt) { prior.commitReceipt = structuredClone(ack.receipt); return true }
+    return false
+  }
+  const expectedTurn = variant.turns.length + 1
+  if (turn.turn !== expectedTurn) throw new Error(`expected turn ${expectedTurn}, found ${turn.turn}`)
+  const snapshot = validateTrialSnapshot(ack.checkpoint)
+  delete snapshot.snapshotId
+  const checkpointId = createSnapshotId(snapshot)
+  snapshot.snapshotId = checkpointId
+  storage.writeSnapshot(checkpointId, snapshot)
+  variant.turns.push(turn)
+  variant.turns.sort((left, right) => left.turn - right.turn)
+  variant.checkpointSnapshotId = checkpointId
+  if (turn.attemptId) variant.attempts = variant.attempts.filter(item => item.attemptId !== turn.attemptId)
+  if (turn.taskUsage) applyTaskUsage(record, turn.taskUsage)
+  else {
+    record.usage.requests += Number(turn.usage?.requests ?? 0)
+    record.usage.reportedTokens += Number(turn.usage?.reportedTokens ?? 0)
+    record.usage.elapsedMs += Number(turn.elapsedMs ?? 0)
+  }
+  if (variant.turns.length >= record.scenario.steps.length) variant.status = 'complete'
+  return true
+}
+
+function knownUncommittedOutcome(value) { return value === 'failed' || value === 'cancelled' }
+function safeReason(error) { return String(error?.message ?? error).replace(/[\r\n]/gu, ' ') }
+function allVariantsComplete(record) {
+  return record.variants.length > 0 && record.variants.every(variant => variant.turns.length >= record.scenario.steps.length)
+}
+function hasUnknownResult(record) {
+  return Boolean(record.recoveryBlocked) || record.variants.some(variant =>
+    (variant.attempts ?? []).some(attempt => attempt.status === 'needs_confirmation'))
+}
+function workerGeneration(record) {
+  return (record.retryOperationIds ?? (record.retryOperationId ? [record.retryOperationId] : [])).length
 }
 
 function createSnapshotId(snapshot) {
@@ -923,19 +1170,11 @@ function createSnapshotId(snapshot) {
 
 function exportSnapshot(snapshot) {
   const source = structuredClone(snapshot)
-  delete source.modelProvider
-  delete source.modelProviders
-  delete source.sourceOptions
   if (source.character) source.character = scrubJsonBase64Document(source.character)
-  if (source.nativePreset?.document) {
-    source.nativePreset.document = scrubJsonBase64Document(source.nativePreset.document)
+  for (const preset of source.productPresets ?? []) {
+    if (preset.document) preset.document = scrubJsonBase64Document(preset.document)
   }
-  if (source.modelSelection) {
-    source.modelSelection = {
-      provider: source.modelSelection.provider,
-      model: source.modelSelection.model,
-    }
-  }
+  source.nativePresetDocuments = (source.nativePresetDocuments ?? []).map(preset => scrubCredentials(preset))
   return scrubCredentials(source)
 }
 
@@ -947,8 +1186,7 @@ function scrubJsonBase64Document(document) {
 
 async function resolveWorkerCredentials(ctx, snapshot) {
   const credentials = {}
-  const routes = snapshot?.modelProviders ?? (snapshot?.modelProvider ? [snapshot.modelProvider] : [])
-  for (const route of routes) {
+  for (const route of snapshot?.modelProviders ?? []) {
     const value = route?.settingsValue
     const refs = new Set([
       route?.entry?.credentialRef,
@@ -962,12 +1200,6 @@ async function resolveWorkerCredentials(ctx, snapshot) {
     }
   }
   return credentials
-}
-
-function mergePresetDefinitions(saved, captured) {
-  const byId = new Map(saved.map(item => [item.id, item]))
-  for (const definition of captured) byId.set(definition.id, definition)
-  return [...byId.values()]
 }
 
 function scrubCredentials(value) {
@@ -995,10 +1227,24 @@ function normalizeLimit(value) {
 function trialEvidenceTurn(evidence) {
   const runTurn = evidence.trajectory?.run?.turn
   if (Number.isSafeInteger(runTurn)) return runTurn
+  const nativeTurn = evidence.nativeTurn ?? evidence.commitReceipt?.turn ?? evidence.commitIdentity?.turn
+  if (Number.isSafeInteger(nativeTurn)) return nativeTurn
   const afterSeq = Number.isSafeInteger(evidence.afterSeq) ? evidence.afterSeq : -1
   const boundary = evidence.nativeEvents?.find(event => event.seq > afterSeq && event.type === 'turn/start')
     ?? evidence.nativeEvents?.find(event => event.seq > afterSeq && event.type === 'turn/end')
   return Number.isSafeInteger(boundary?.data?.turn) ? boundary.data.turn : undefined
+}
+
+function attemptInputMessageId(attempt) {
+  if (typeof attempt.commitIdentity?.inputMessageId === 'string' && attempt.commitIdentity.inputMessageId) {
+    return attempt.commitIdentity.inputMessageId
+  }
+  if (!Array.isArray(attempt.nativeEvents)) return undefined
+  const afterSeq = Number.isSafeInteger(attempt.afterSeq) ? attempt.afterSeq : -1
+  const input = attempt.nativeEvents.find(event => event?.type === 'user/message'
+    && Number.isSafeInteger(event.seq) && event.seq > afterSeq)
+  const id = input?.data?.id ?? input?.data?.message?.id
+  return typeof id === 'string' && id ? id : undefined
 }
 
 function isAtOrBeforeEvidence(candidate, selected, selectedTurn) {

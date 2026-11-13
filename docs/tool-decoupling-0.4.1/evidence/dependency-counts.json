@@ -1,0 +1,40 @@
+{
+  "beforeCommit": "ee6d43a90aaa534e6a635df97b0fd4dd3856db6b",
+  "beforeReferences": [
+    "eleckoi_apply_setting_patch",
+    "eleckoi_apply_variable_patch",
+    "eleckoi_call_capability",
+    "eleckoi_capability_probe",
+    "eleckoi_create_setting_file",
+    "eleckoi_delete_setting_file",
+    "eleckoi_describe_toolset",
+    "eleckoi_glob_setting_files",
+    "eleckoi_glob_variables",
+    "eleckoi_grep_setting_files",
+    "eleckoi_grep_variables",
+    "eleckoi_list_toolsets",
+    "eleckoi_move_setting_file",
+    "eleckoi_native_web_search_bridge",
+    "eleckoi_read_setting_files",
+    "eleckoi_read_uploaded_file",
+    "eleckoi_read_variables",
+    "eleckoi_update_setting_file",
+    "eleckoi_web_search",
+    "update_roleplay_plan"
+  ],
+  "afterDenialNames": [
+    "eleckoi_apply_setting_patch",
+    "eleckoi_apply_variable_patch",
+    "eleckoi_glob_setting_files",
+    "eleckoi_glob_variables",
+    "eleckoi_grep_setting_files",
+    "eleckoi_grep_variables",
+    "eleckoi_read_setting_files",
+    "eleckoi_read_uploaded_file",
+    "eleckoi_read_variables",
+    "update_roleplay_plan"
+  ],
+  "beforeOperationalProductTools": 10,
+  "afterOperationalProductTools": 0,
+  "hostPatchSha256": "b224d9af29cb2d276d9da24cbd4ef75a08d175ad520e3ec70e6a52729e27b95e"
+}

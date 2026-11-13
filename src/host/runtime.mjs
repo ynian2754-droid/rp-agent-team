@@ -1,66 +1,53 @@
 import { registerExecutionSession, finishExecutionSession, traceAssociation, observeStatePath } from './execution-trace.mjs'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   applySavedRunFields, conversationTraceDirectory as conversationTraceDirectoryPath, fingerprint, manualSelectionPath,
   persistedRunValue, readOptionalJson, readRunRecordFile,
   readRunRows, removeRunData, runDataDirectory as runDataDirectoryPath, runFilePath, serializedActiveRun,
-  writeJsonAtomic
+  writeJsonAtomic, conversationTraceDirectory
 } from './run-persistence.mjs'
 import { interruptPersistedRequests, readRequestRecords } from './request-persistence.mjs'
 import {
   bindAgentSession, cancelRun as cancelRunState, commitRun as commitRunState, completeRun,
-  configRevision, createRun, failRun, hydrateRun, runStatus, setRunPhase, stagePublication,
+  configRevision, createRun, failRun, hydrateRun, runStatus, setRunPhase, stagePublication, writesToReplayOnRetry,
   teamError, unbindAgentSession
 } from './run-state.mjs'
 import { TeamConfigStore } from './config-store.mjs'
-import { StateStore, describeStateToolAccess, projectStateValueForAgent, versionForPath } from './state-store.mjs'
+import { StateStore, describeStateToolAccess, projectStateValueForAgent } from './state-store.mjs'
 import { createScheduler } from './scheduler.mjs'
 import { createCommunication } from './communication.mjs'
 import { buildAgentContext, draftVisibleTo } from './context-policy.mjs'
 import { actualTokenUsage, createTrace, recordTrace, traceSummary } from './trace.mjs'
-import { disposeRegisteredAgentPresets, resolveAgentModel, resolveAgentPreset, validateAgentModelRoutes } from './agent-composition.mjs'
+import { disposeRegisteredAgentPresets, resolveAgentModel, resolveAgentPreset, restoreRegisteredAgentPreset, validateAgentModelRoutes } from './agent-composition.mjs'
 import { registerTeamTools } from './team-tools.mjs'
 import { registerMemoryTools } from './memory-tools.mjs'
+import { registerContextTools } from './context-tools.mjs'
 import { resolveAuthorParameters } from '../shared/author-parameters.mjs'
 import {
   committedTriggerCooldowns, createTriggerTracker, latestCommittedStateCheckpoint, stateChangesFromCheckpoint
 } from './event-triggers.mjs'
 import { assertBudgetedRunDispatchable, createRunBudget, isBudgetedTeamRequest, requestOrigin } from './run-budget.mjs'
 import {
-  canReadNativeNamespace, canWriteNativeNamespace, childPolicy, childPrompt,
+  childPolicy, childPrompt,
   conditionState, createChildContextData, makeSources
 } from './agent-context.mjs'
 import {
-  allowedGroupsForAgent, CAPABILITIES, capabilityAvailableInSnapshot,
-  capabilityForDeclaration, capabilityLabel, MANAGED_CAPABILITIES,
-  NATIVE_PRESET_TOOLS, toolGroups
+  CAPABILITIES, capabilityAvailableInSnapshot,
+  allowedGroupsForAgent, capabilityLabel, MANAGED_CAPABILITIES,
+  toolGroups, restrictMemberTools
 } from './native-policy.mjs'
-import {
-  bridgeSettingFiles, diffLeaves, escapePointer, stableJson, storyOperations
-} from './context-world-adapter.mjs'
+import { setPointerValue, stableJson } from './context-world-adapter.mjs'
 import { evaluateCondition, migrateV1ToV2, normalizeTeamConfig, parsePreset } from '../shared/schema.mjs'
 import { createTeamDeliveryAdapter, TEAM_DELIVERY_MODEL, TEAM_DELIVERY_PROVIDER } from './delivery-adapter.mjs'
-import { isOwnedSettledNotice, matchesRunInputMessage, sumTokenSamplesForSessions } from './session-event-policy.mjs'
+import { activeUserInputIds, isAppendedSurfaceEvent, isOwnedSettledNotice, matchesRunInputMessage, readSessionEvents, sumTokenSamplesForSessions } from './session-event-policy.mjs'
 
 const TOOL_GROUP = 'rp-team'
-const VARIABLE_READ_TOOLS = ['eleckoi_glob_variables', 'eleckoi_grep_variables', 'eleckoi_read_variables']
-const VARIABLE_WRITE_TOOLS = ['eleckoi_apply_variable_patch']
-const SETTING_READ_TOOLS = ['eleckoi_glob_setting_files', 'eleckoi_grep_setting_files', 'eleckoi_read_setting_files']
-const SETTING_WRITE_TOOLS = ['eleckoi_apply_setting_patch', 'eleckoi_create_setting_file', 'eleckoi_update_setting_file', 'eleckoi_delete_setting_file', 'eleckoi_move_setting_file']
-
-function disabledToolNamesForAgent(inherited, agent) {
-  const disabled = new Set(inherited ?? [])
-  if (!agent || !canWriteNativeNamespace(agent, 'variables')) {
-    for (const name of VARIABLE_WRITE_TOOLS) disabled.add(name)
-  }
-  return [...disabled]
-}
 
 /** Native DSH supplies Sessions and model/tool composition; this module owns roster policy and publication. */
 export function createRpAgentTeam(ctx, dependencies) {
-  const { defineTool, parseYaml, stringifyYaml, scopeOf, LlmAdapter } = dependencies
+  const { defineTool, parseYaml, stringifyYaml, scopeOf, createScope, LlmAdapter } = dependencies
   const store = new TeamConfigStore()
   const stateStore = new StateStore()
   const runs = new Map()
@@ -74,16 +61,25 @@ export function createRpAgentTeam(ctx, dependencies) {
   const pendingRetry = new Map()
   const manualSelections = new Map()
   const registeredPresets = new Map()
+  const derivedPresetFile = join(dirname(store.path), 'derived-presets.json')
+  const derivedPresetDefinitions = new Map()
+  const installedAgentScopes = new Map()
+  const latestStepBySession = new Map()
+  const pendingRootSteps = new Map()
   const dataRoot = join(dirname(store.path), 'runs')
   const traceRoot = join(dirname(store.path), 'traces')
   let disposed = false
   let disposing = false
+  let installed = false
+  let uninstallNativeHooks = () => {}
   const deliveryRegistration = ctx.llm.registerAdapter(
     [TEAM_DELIVERY_PROVIDER], createTeamDeliveryAdapter(deliverScheduledRun, LlmAdapter)
   )
 
+  const runRowsCache = new Map()
   const recoveryReceipts = new Map()
   const recoveryWrites = new Map()
+  const ready = restoreDerivedAgentPresets()
   const recoveryReady = stateStore.recover(async ({ conversationId, runId }) => {
     const key = `${conversationId}\u0000${runId}`
     const receipt = await getProductCommitStatus({ conversationId, runId })
@@ -96,12 +92,24 @@ export function createRpAgentTeam(ctx, dependencies) {
     return receipt
   }).then(recovered => {
     for (const transaction of recovered) {
-      if (!['committed', 'rolled_back'].includes(transaction.status)) continue
+      // One damaged run record must not reject recovery: that would break every Team call until the next restart.
+      try { recoverSettledTransaction(transaction) } catch (error) {
+        console.error(`[rp-team] recovery skipped run ${transaction.runId}: ${error?.message ?? error}`)
+      }
+    }
+    recoverInterruptedRuns()
+  })
+
+  function recoverSettledTransaction(transaction) {
+    {
+      if (!['committed', 'rolled_back'].includes(transaction.status)) return
       const key = `${transaction.conversationId}\u0000${transaction.runId}`
       const receipt = recoveryReceipts.get(key)
-      if (!receipt || !['committed', 'failed', 'cancelled'].includes(receipt.outcome)) continue
+      if (!receipt || !['committed', 'failed', 'cancelled'].includes(receipt.outcome)) return
       const run = loadRunRecordAsRuntime(transaction.conversationId, transaction.runId)
-      if (!run) continue
+      if (!run) return
+      // The process may have stopped after persisting `publishing` but before the Host acknowledged the stage.
+      if (run.phase === 'publishing' && run.publication) completeRun(run)
       run.dataDir = runDataDirectory(run.conversationId, run.runId)
       run.stateTransaction = transaction
       run.productReceiptOutcome = receipt.outcome
@@ -112,28 +120,53 @@ export function createRpAgentTeam(ctx, dependencies) {
         run.preservedStateWrites = recoveryWrites.get(key) ?? []
         recordCommitFailure(run, receipt.outcome, new Error(run.failure))
       }
-      commitRunState(run, receipt.outcome, receipt.productMessageId)
+      commitRunState(run, receipt.outcome, receipt.assistantMessageId)
       record(run, { type: receipt.outcome === 'committed' ? 'publication.committed' : 'publication.rolled_back',
         agentId: run.outputAgentId, data: {
-          status: receipt.outcome, productMessageId: receipt.productMessageId,
+          status: receipt.outcome, productMessageId: receipt.assistantMessageId,
           ...(run.failure ? { reason: run.failure } : {}),
           assistantSeq: run.assistantSeq, assistantMessageId: run.assistantMessageId
         } })
       cleanRunData(run)
       persistRun(run)
     }
-  })
+  }
 
-  const extension = {
-    id: 'rp-agent-team',
-    toolGroups: [{ id: TOOL_GROUP, label: 'RP Agent Team' }],
-    resolveSnapshot,
-    resolveChildOptions,
-    setupAgent,
-    prepareConversationRestore,
-    classifyTool: ({ declaration }) => declaration?.name?.startsWith('rp_team_') ? TOOL_GROUP : undefined,
-    authorizePresetTools,
-    mode: ({ sessionId }) => activeRunBySession.has(String(sessionId)) || childBindings.has(String(sessionId)) ? 'team' : 'normal'
+  /**
+   * A run whose state transaction is still open at startup stopped before its reply reached the Host
+   * (an app crash or forced quit). It can never finish, so fail it, release its state paths and allow a retry.
+   */
+  function recoverInterruptedRuns() {
+    const reason = 'Interrupted: the app stopped before this round finished'
+    for (const [conversationId, conversation] of Object.entries(stateStore.readDocument().conversations ?? {})) {
+      for (const transaction of Object.values(conversation?.runs ?? {})) {
+        if (transaction?.status !== 'open') continue
+        try {
+          const run = loadRunRecordAsRuntime(conversationId, transaction.runId)
+          if (run?.productCommitStaged || run?.phase === 'awaiting_commit') continue
+          if (!run) {
+            stateStore.rollback({ conversationId, runId: transaction.runId, reason })
+            continue
+          }
+          run.dataDir = runDataDirectory(run.conversationId, run.runId)
+          for (const member of Object.values(run.members ?? {})) {
+            if (!['complete', 'skipped', 'failed'].includes(member.status)) {
+              member.status = 'failed'
+              member.error ??= reason
+            }
+          }
+          failRun(run, run.failure || reason)
+          run.productReceiptOutcome = 'failed'
+          rollbackState(run, reason)
+          closeRunBudget(run)
+          record(run, { type: 'run.interrupted', agentId: run.outputAgentId, data: { reason } })
+          cleanRunData(run)
+          persistRun(run)
+        } catch (error) {
+          console.error(`[rp-team] could not recover interrupted run ${transaction.runId}: ${error?.message ?? error}`)
+        }
+      }
+    }
   }
 
   const api = {
@@ -170,229 +203,298 @@ export function createRpAgentTeam(ctx, dependencies) {
   const authoring = {
     store, stateStore, recoveryReady,
     isConversationBusy,
-    getRunRecords
+    getRunRecords,
+    reconcileBranch,
+    // Committed cooldown markers still on the active branch, for the next-round forecast.
+    readCooldownMarkers: (conversationId, activeInputMessageIds) =>
+      committedTriggerCooldowns(loadRunRows(String(conversationId)), activeInputMessageIds)
   }
 
-  const disposeSessionEvents = ctx.on('session/event', (session, event) => onSessionEvent(session, event))
-  const disposeBudgetStream = ctx.on('llm/stream', (options, next) => guardTeamModelRequest(options, next))
-
-  async function resolveSnapshot({ sessionId, parentSessionId, child, snapshot }) {
-    const session = String(sessionId)
-    if (child) return resolveChildSnapshot({ sessionId: session, parentSessionId, snapshot })
-    return {}
+  function install() {
+    if (installed) return uninstallNativeHooks
+    installed = true
+    const disposers = [
+      ctx.on('agent/created', async ({ agent }) => await installAgentScope(agent)),
+      ctx.on('agent/disposed', ({ agent }) => disposeAgentScope(agent?.session?.id ?? agent?.id)),
+      ctx.on('agent/prepare-step', prepareAgentModel),
+      ctx.on('agent/pre-step', onAgentPreStep, { prepend: true }),
+      ctx.on('session/event', (session, event) => onSessionEvent(session, event)),
+      ctx.on('llm/stream', (options, next) => {
+        const run = runForSession(options?.sessionId)
+        if (run) captureModelInput(run, options)
+        return guardTeamModelRequest(options, next)
+      })
+    ]
+    uninstallNativeHooks = () => {
+      for (const dispose of disposers.reverse()) dispose?.()
+      for (const id of [...installedAgentScopes.keys()]) disposeAgentScope(id)
+      pendingRootSteps.clear()
+      installed = false
+    }
+    return uninstallNativeHooks
   }
 
-  function resolveChildOptions({ parentSessionId, label }) {
-    const rootSessionId = String(parentSessionId ?? '')
-    const run = runs.get(activeRunBySession.get(rootSessionId))
-    const pending = run && pendingChildFor(run, label)
-    if (!pending) return undefined
-    const { provider, model, reasoningEffort, maxTokens } = pending.route
-    return {
-      provider, model,
-      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-      ...(maxTokens === undefined ? {} : { maxTokens })
+  async function restoreDerivedAgentPresets() {
+    const saved = readOptionalJson(derivedPresetFile, { version: 1, presets: [] })
+    if (saved.version !== 1 || !Array.isArray(saved.presets)) {
+      throw teamError('RP_TEAM_PRESET_STORE_INVALID', 'RP Team derived preset storage has an unsupported format')
+    }
+    for (const recipe of saved.presets) {
+      if (!recipe || typeof recipe.id !== 'string' || !recipe.id.startsWith('rp-team-')) {
+        throw teamError('RP_TEAM_PRESET_STORE_INVALID', 'RP Team derived preset storage contains an invalid definition')
+      }
+      const prior = derivedPresetDefinitions.get(recipe.id)
+      if (prior && stableJson(prior) !== stableJson(recipe)) {
+        throw teamError('RP_TEAM_PRESET_STORE_INVALID', `RP Team derived preset ${recipe.id} is duplicated`)
+      }
+      derivedPresetDefinitions.set(recipe.id, structuredClone(recipe))
+      const registration = restoreRegisteredAgentPreset(recipe, { agentPresets: ctx.agentPresets, parseYaml })
+      registeredPresets.set(recipe.id, registration)
+      await registration
     }
   }
 
-  function resolveChildSnapshot({ sessionId, parentSessionId, snapshot }) {
-    const parentId = String(parentSessionId ?? snapshot.inheritedFromSessionId ?? '')
-    const rootSessionId = String(snapshot.rpTeamRootSessionId ?? parentId)
-    const runId = activeRunBySession.get(rootSessionId) ?? snapshot.rpTeamRunId
-    const run = runs.get(String(runId))
-    if (!run || run.rootSessionId !== rootSessionId) return {}
-    if (parentId !== rootSessionId) {
-      const parentBinding = run.sessionBindings.get(parentId)
-      const owner = agentById(run.config, parentBinding?.agentId ?? snapshot.rpTeamAgentId)
-      return {
-        rpTeamRunId: run.runId, rpTeamRootSessionId: rootSessionId,
-        rpTeamAgentId: owner?.id ?? snapshot.rpTeamAgentId,
-        disabledToolNames: disabledToolNamesForAgent(snapshot.disabledToolNames, owner)
+  async function persistDerivedAgentPreset(recipe) {
+    const prior = derivedPresetDefinitions.get(recipe.id)
+    if (prior && stableJson(prior) !== stableJson(recipe)) {
+      throw teamError('RP_TEAM_PRESET_STORE_INVALID', `RP Team derived preset ${recipe.id} changed unexpectedly`)
+    }
+    derivedPresetDefinitions.set(recipe.id, structuredClone(recipe))
+    writeJsonAtomic(derivedPresetFile, {
+      version: 1,
+      presets: [...derivedPresetDefinitions.values()].sort((left, right) => left.id.localeCompare(right.id))
+    })
+  }
+
+  async function prepareAgentModel({ agent, turn, step, signal }) {
+    const sessionId = String(agent?.session?.id ?? '')
+    if (!sessionId || disposing || disposed) return
+    await installAgentScope(agent)
+    const child = childBindings.get(sessionId)
+    if (child) {
+      agent.model.select(modelSelection(child.route))
+      return
+    }
+    if (agent.session.header?.origin === 'subagent' || step !== 1) return
+
+    const prepared = await ctx.eleckoiConversationsApi.preparedTurn({ sessionId })
+    signal?.throwIfAborted()
+    if (!prepared || String(prepared.sessionId) !== sessionId || Number(prepared.turn) !== turn) return
+    const conversationId = String(prepared.conversationId)
+    const saved = store.get(conversationId)
+    if (!saved?.enabled) {
+      // An ordinary turn cannot consume a staged Team retry; drop it so it does not linger.
+      for (const [id, intent] of pendingRetry) if (intent.conversationId === conversationId) pendingRetry.delete(id)
+      return
+    }
+
+    const selected = agent.model.current()
+    const ordinary = isTeamDeliveryModel(selected) ? prepared.model : selected ?? prepared.model
+    const modelSnapshot = freezeProposedModel(ordinary, prepared.model)
+    pendingRootSteps.set(sessionId, {
+      turn, conversationId, operationId: String(prepared.operationId), configRevision: saved.revision,
+      modelSnapshot, agent, signal, messages: [], routeSelected: true
+    })
+    agent.model.select({ provider: TEAM_DELIVERY_PROVIDER, model: TEAM_DELIVERY_MODEL })
+  }
+
+  function restoreRootSelection(pending) {
+    if (pending && isTeamDeliveryModel(pending.agent.model.current())) {
+      pending.agent.model.select(modelSelection(pending.modelSnapshot))
+    }
+  }
+
+  async function onAgentPreStep(event, next) {
+    const agent = event?.agent
+    if (!agent?.session?.id || disposing || disposed) return await next()
+    const sessionId = String(agent.session.id)
+    await installAgentScope(agent)
+    const activeId = activeRunBySession.get(sessionId)
+    const active = activeId ? runs.get(activeId) : undefined
+    if (agent.session.header?.origin === 'subagent' || childBindings.has(sessionId)) return await next()
+    const pending = pendingRootSteps.get(sessionId)
+    // DSH has already captured the route for this step. Restore the ordinary
+    // Session selection before it is read by later steps or by the composer.
+    if (pending?.turn === event.turn) restoreRootSelection(pending)
+    const originalMessages = Array.isArray(event.messages) ? event.messages : []
+    const messages = await excludeOwnedSettledNotices(sessionId, active?.conversationId, originalMessages, event.signal)
+    if (active?.turn === event.turn) {
+      if (originalMessages.length && !messages.length) return { kind: 'enter', messages: [] }
+      return { kind: 'enter', messages }
+    }
+    if (originalMessages.length && !messages.length) return { kind: 'enter', messages: [] }
+    const excludedNoticeIds = new Set(originalMessages.filter(message => !messages.includes(message)
+      && typeof message?.id === 'string').map(message => message.id))
+    const excludedNoticeSenders = new Set(originalMessages.filter(message => !messages.includes(message))
+      .map(message => String(message?.source?.senderSessionId ?? '')).filter(Boolean))
+    if (pending?.turn === event.turn) pending.messages = messages
+    const decision = await next()
+    if (decision?.kind === 'reject' || decision?.kind === 'error') pendingRootSteps.delete(sessionId)
+    if (decision?.kind !== 'enter' || (!excludedNoticeIds.size && !excludedNoticeSenders.size)) return decision
+    return { ...decision, messages: (decision.messages ?? []).filter(message => !excludedNoticeIds.has(message?.id)
+      && !(message?.role === 'user' && message?.source?.kind === 'subagent-settled'
+        && excludedNoticeSenders.has(String(message.source.senderSessionId ?? '')))) }
+  }
+
+  async function installAgentScope(agent) {
+    await ready
+    const sessionId = String(agent?.session?.id ?? agent?.id ?? '')
+    if (!sessionId || installedAgentScopes.has(sessionId)) return installedAgentScopes.get(sessionId)?.ctx
+    if (typeof createScope !== 'function') throw new Error('DSH createScope is required to install native Agent hooks')
+    const key = scopeOf(agent.ctx)
+    if (!key) throw new Error(`Native Agent ${sessionId} has no public DSH scope identity`)
+    const scope = createScope(agent.ctx, key)
+    const agentCtx = scope.ctx
+    const disposers = []
+    const entry = { scope, ctx: agentCtx, disposers, owner: undefined }
+    installedAgentScopes.set(sessionId, entry)
+    disposers.push(agentCtx.on('agent/request', async (event, next) => {
+      const proposed = await next()
+      const childBinding = childBindings.get(sessionId)
+      if (childBinding) {
+        const { provider, model, reasoningEffort, ...controls } = childBinding.route
+        return { ...proposed, ...controls }
+      }
+      if (!isTeamDeliveryModel(proposed)) return proposed
+      const pending = pendingRootSteps.get(sessionId)
+      if (pending?.turn === event.turn) {
+        pending.modelSnapshot = freezeProposedModel(pending.modelSnapshot, { ...pending.modelSnapshot, ...proposed })
+      }
+      const { temperature, topP, maxTokens, ...local } = proposed
+      return local
+    }, { prepend: true }))
+    agent.ctx.effect?.(() => () => disposeAgentScope(sessionId))
+
+    const parentSessionId = String(agent.session.header?.parentSession ?? '')
+    let run, member, binding, childBinding
+    const rootRunId = activeRunBySession.get(parentSessionId)
+    if (rootRunId) {
+      run = runs.get(rootRunId)
+      const row = nativeMember(parentSessionId, sessionId)
+      const pending = row && pendingChildFor(run, row.description)
+      if (pending && bindPendingChild(run, pending.marker, sessionId, row.name)) childBinding = childBindings.get(sessionId)
+      if (childBinding) binding = run.sessionBindings.get(sessionId)
+    } else {
+      const parent = [...runs.values()].map(candidate => [candidate, candidate.sessionOwners?.get(parentSessionId)]).find(([, owner]) => owner)
+      if (parent) {
+        [run] = parent
+        const owner = parent[1]
+        member = agentById(run.config, owner.agentId)
+        if (member) {
+          const depth = (run.executionSessions.find(item => item.sessionId === parentSessionId)?.depth ?? 0) + 1
+          run.sessionOwners.set(sessionId, { ...owner, sessionId, scheduled: false })
+          registerExecutionSession(run, { agentId: member.id, activation: owner.activation, sessionId,
+            parentSessionId, depth, scheduled: false })
+          if (!run.members[member.id].sessions.includes(sessionId)) run.members[member.id].sessions.push(sessionId)
+        }
       }
     }
-    const row = nativeMember(rootSessionId, sessionId)
-    const pending = row && pendingChildFor(run, row.description)
-    if (!pending) return { rpTeamRunId: run.runId, rpTeamRootSessionId: rootSessionId, rpTeamSourceContextFile: undefined }
-    bindPendingChild(run, pending.marker, String(sessionId), row.name)
-    return childSnapshotOverlay(run, pending, snapshot)
-  }
-
-  function childSnapshotOverlay(run, pending, snapshot) {
-    const agent = agentById(run.config, pending.agentId)
-    const route = pending.route
-    const presetId = pending.presetId
-    const groups = pending.allowedGroups
-    const currentDisabled = new Set(snapshot.disabledToolGroupIds ?? [])
-    const disabledToolGroupIds = [...new Set([
-      ...pending.rootGroups.filter(id => !groups.has(id)),
-      ...[...currentDisabled].filter(id => !groups.has(id))
-    ])]
-    return {
-      rpTeamBinding: run.binding,
-      rpTeamRunId: run.runId,
-      rpTeamRootSessionId: run.rootSessionId,
-      rpTeamAgentId: agent.id,
-      rpTeamActivation: pending.activationNo,
-      rpTeamSourceContextFile: undefined,
-      contextFile: pending.contextFile,
-      variableStateFile: pending.variableStateFile,
-      settingStateFile: pending.settingStateFile,
-      mountedPresetId: presetId,
-      subagentModel: route,
-      model: { ...structuredClone(route), systemPrompt: '' },
-      disabledToolGroupIds,
-      disabledToolNames: disabledToolNamesForAgent(snapshot.disabledToolNames, agent),
-      ...(agent.compaction.historyCompactionInstructions === undefined ? {} : {
-        historyCompactionInstructions: agent.compaction.historyCompactionInstructions
-      })
-    }
-  }
-
-  async function setupAgent({ agentCtx, agent, sessionId, child, snapshot, binding: hostBinding, getTurnSnapshot }) {
-    const session = String(sessionId)
-    if (!child) {
-      const conversationId = String(hostBinding?.conversationId ?? snapshot.conversationId ?? '')
-      if (conversationId) bindingsBySession.set(session, { conversationId, rootSessionId: session })
-      const disposers = []
-      disposers.push(agentCtx.on('agent/pre-step', async (event, next) => {
-        const messages = Array.isArray(event?.messages) ? event.messages : []
-        const users = messages.filter(message => message?.role === 'user' && message?.source?.kind === 'user')
-        if (users.length === 0) {
-          const binding = bindingsBySession.get(session)
-          const ownedChildSessionIds = ownedChildSessions(session, binding?.conversationId)
-          if (messages.length > 0 && messages.every(message => isOwnedSettledNotice(message, ownedChildSessionIds))) {
-            const activeId = activeRunBySession.get(session)
-            const active = activeId ? runs.get(activeId) : undefined
-            if (active?.phase === 'awaiting_commit' && active.turn === event.turn) {
-              await commitPublishedRun(agentCtx, agent, active, event.signal)
-            }
-            return { kind: 'enter', messages: [] }
-          }
-          return await next()
+    if (run && childBinding) {
+      binding = run.sessionBindings.get(sessionId)
+      member = agentById(run.config, binding?.agentId)
+    } else if (run && binding) member = agentById(run.config, binding.agentId)
+    if (run && member) {
+      const scheduled = Boolean(childBinding)
+      entry.owner = { runId: run.runId, agentId: member.id, scheduled, sessionId }
+      if (scheduled) {
+        // Team's native spawn request has no preset field. Select through the
+        // public registry while the new child Session is still blank; this
+        // persists the actual composition used by the first prompt and by any
+        // later cold resume. `composeFrom` already joined the inherited preset.
+        const presetId = childBinding.presetId
+        if (presetId && ctx.agentPresets.composedPreset(agent.ctx) !== presetId) {
+          await ctx.agentPresets.select(agent, presetId)
         }
-        const activeId = activeRunBySession.get(session)
-        const active = activeId ? runs.get(activeId) : undefined
-        if (active?.turn === event.turn) return { kind: 'enter', messages }
-        const captured = await getTurnSnapshot({ messages, turn: event.turn, signal: event.signal })
-        const conversationId = String(captured.conversationId ?? hostBinding?.conversationId ?? snapshot.conversationId ?? '')
-        if (!conversationId) return await next()
-        await recoveryReady
-        const saved = store.get(conversationId)
-        if (disposing || disposed || !saved.enabled) return await next()
-        const run = await beginRun({ sessionId: session, turn: event.turn, snapshot: captured, rootSnapshot: snapshot,
-          rootAgent: agent, claimedMessages: messages, config: saved.config, parameterValues: saved.parameterValues, configRevision: saved.revision,
-          disabledToolGroupIds: hostBinding?.productDisabledGroups ?? snapshot.disabledToolGroupIds ?? [] })
-        if (run) return { kind: 'enter', messages }
-        return await next()
-      }, { prepend: true }))
-      disposers.push(agentCtx.on('agent/request', async (event, next) => {
-        const proposed = await next()
-        const runId = activeRunBySession.get(session)
-        const run = runId ? runs.get(runId) : undefined
-        if (!run || run.turn !== event.turn || run.phase !== 'working') return proposed
-        const { provider: _provider, model: _model, reasoningEffort: _reasoningEffort,
-          temperature: _temperature, topP: _topP, maxTokens: _maxTokens, ...rest } = proposed
-        return { ...rest, provider: TEAM_DELIVERY_PROVIDER, model: TEAM_DELIVERY_MODEL }
-      }, { prepend: true }))
-      disposers.push(agentCtx.on('agent/turn-stopping', async ({ turn, signal }) => {
-        const runId = activeRunBySession.get(session)
-        const run = runId ? runs.get(runId) : undefined
-        if (!run || run.turn !== turn || run.phase !== 'awaiting_commit') return
-        await commitPublishedRun(agentCtx, agent, run, signal)
-      }))
-      return () => { for (const dispose of disposers.reverse()) dispose?.() }
+        disposers.push(agentCtx.systemPrompt.section({
+          name: `rp-agent-team:${run.runId}:${member.id}:${binding.activation}`,
+          order: agentCtx.systemPrompt.getSectionOrder('TEAM_POLICY'),
+          text: childPolicy(member, run, binding.activation, run.pendingChildren)
+        }))
+        disposers.push(registerTools(agentCtx, member, run, sessionId))
+      }
+      disposers.push(await restrictAgentCapabilities(agentCtx, member, run, agent.session.header ?? {}, scheduled))
+      record(run, { type: 'session.scope_installed', agentId: member.id, data: { sessionId, scheduled } })
+      persistRun(run)
     }
-
-  async function commitPublishedRun(agentCtx, agent, run, signal) {
-    try {
-      assertBudgetAvailable(run)
-      signal?.throwIfAborted()
-      await run.localDeliveryMarkerPromise
-      assertBudgetAvailable(run)
-      if (run.localDeliveryMarkerError) throw run.localDeliveryMarkerError
-      const flushed = await agentCtx.sessions.flush(agent.session)
-      assertBudgetAvailable(run)
-      if (flushed === false) throw teamError('RP_TEAM_SESSION_FLUSH_FAILED', 'The root Session did not confirm persistence')
-      const receipt = await ctx.eleckoiStoryState.commitProductTurn({
-        conversationId: run.conversationId, runId: run.runId, sessionId: run.rootSessionId, turn: run.turn
-      })
-      if (receipt?.outcome !== 'committed') throw teamError('RP_TEAM_PRODUCT_COMMIT_FAILED', 'Host did not confirm the Team response commit')
-      await commitProductState(run, receipt)
-    } catch (error) {
-      if (run.budgetFailure) await settleFailedRun(run, 'failed', run.budgetFailure)
-      else await settleRunFromReceipt(run)
-      throw error
-    }
-  }
-    const run = runs.get(String(snapshot.rpTeamRunId))
-    const binding = run?.sessionBindings.get(session)
-    const childBinding = childBindings.get(session)
-    if (!run) return undefined
-    const member = agentById(run.config, binding?.agentId ?? snapshot.rpTeamAgentId)
-    if (!member) return undefined
-    run.sessionOwners ??= new Map()
-    run.sessionOwners.set(session, {
-      runId: run.runId, agentId: member.id, activation: binding?.activation ?? snapshot.rpTeamActivation,
-      sessionId: session, scheduled: Boolean(binding)
-    })
-    registerExecutionSession(run, { agentId: member.id, activation: binding?.activation ?? snapshot.rpTeamActivation,
-      sessionId: session, parentSessionId: agent.session.parentSessionId ?? agent.session.parentAgent?.session?.id ?? snapshot.inheritedFromSessionId,
-      depth: childBinding?.depth ?? ((run.executionSessions.find(row => row.sessionId === snapshot.inheritedFromSessionId)?.depth ?? 0) + 1), scheduled: Boolean(binding) })
-    const memberRunState = run.members[member.id]
-    if (!memberRunState.sessions.includes(session)) memberRunState.sessions.push(session)
-    persistRun(run)
-    const requestDispose = agentCtx.on('agent/request', async (event, next) => {
-      const proposed = await next()
-      if (!binding || !childBinding) return proposed
-      const { provider: _provider, model: _model, reasoningEffort: _reasoningEffort,
-        temperature: _temperature, topP: _topP, maxTokens: _maxTokens, ...rest } = proposed
-      return { ...rest, ...childBinding.route }
-    }, { prepend: true })
-    if (!binding || !childBinding) {
-      const capabilityDispose = await restrictAgentCapabilities(agentCtx, member, run, snapshot, false)
-      const stateDispose = restrictManagedStateTools(agentCtx, member)
-      return () => { requestDispose?.(); capabilityDispose?.(); stateDispose?.() }
-    }
-    const disposers = []
-    const promptDispose = agentCtx.systemPrompt.section({
-      name: `rp-agent-team:${run.runId}:${member.id}:${binding.activation}`,
-      order: agentCtx.systemPrompt.getSectionOrder('TEAM_POLICY'),
-      text: childPolicy(member, run, binding.activation, run.pendingChildren)
-    })
-    disposers.push(registerTools(agentCtx, member, run, session))
-    disposers.push(await restrictAgentCapabilities(agentCtx, member, run, snapshot, true))
-    disposers.push(restrictManagedStateTools(agentCtx, member))
-    disposers.push(requestDispose)
-    return () => {
-      promptDispose?.()
-      for (const dispose of disposers.reverse()) if (typeof dispose === 'function') dispose()
-    }
+    return agentCtx
   }
 
+  function disposeAgentScope(sessionId) {
+    restoreRootSelection(pendingRootSteps.get(String(sessionId)))
+    pendingRootSteps.delete(String(sessionId))
+    const entry = installedAgentScopes.get(String(sessionId))
+    if (!entry) return
+    installedAgentScopes.delete(String(sessionId))
+    for (const dispose of entry.disposers.reverse()) if (typeof dispose === 'function') dispose()
+    entry.scope.dispose?.()
+  }
+
+  async function capturePreparedTurn(current, agent, signal) {
+    const conversationId = String(current.conversationId)
+    const sessionId = String(current.sessionId ?? agent.session.id)
+    const [details, author] = await Promise.all([
+      ctx.eleckoiConversationsApi.details(conversationId),
+      ctx.eleckoiConversationsApi.authorState(conversationId)
+    ])
+    const events = await readSessionEvents(ctx, sessionId, signal)
+    const inputEvent = events.find(event => event.type === 'user/message'
+      && (String(sessionMessage(event)?.id ?? '') === String(current.inputMessageId ?? '')
+        || Number.isSafeInteger(current.inputEventSeq) && event.seq === current.inputEventSeq))
+    const inputMessage = inputEvent ? sessionMessage(inputEvent) : undefined
+    const inputEventSeq = current.inputEventSeq ?? inputEvent?.seq
+    const history = events.filter(event => ['user/message', 'assistant/message'].includes(event.type)
+      && isAppendedSurfaceEvent(event)
+      && (event.type !== 'user/message' || sessionMessage(event)?.source?.kind === 'user')
+      && Number.isSafeInteger(inputEventSeq) && event.seq < inputEventSeq)
+      .map(event => ({
+        role: sessionMessage(event)?.role,
+        content: assistantText(sessionMessage(event)),
+        ...(Array.isArray(sessionMessage(event)?.content) ? {
+          attachments: sessionMessage(event).content
+            .filter(part => part?.type === 'image' || part?.type === 'file')
+            .map(part => structuredClone(part))
+        } : {})
+      })).filter(item => ['user', 'assistant'].includes(item.role))
+    const variables = JSON.parse((author.editableVariableStateJson ?? author.currentVariableStateJson) || '{}')
+    const editableSettingLibrary = structuredClone(author.editableSettingLibrary !== undefined
+      ? author.editableSettingLibrary : author.settingLibrary ?? { groups: [], entries: [] })
+    const runtimeSettingLibrary = structuredClone(author.settingLibrary ?? editableSettingLibrary ?? { groups: [], entries: [] })
+    // State reads must match what a write replaces: the editable entry, not its macro-expanded projection.
+    const settings = Object.fromEntries((editableSettingLibrary?.entries ?? []).map(entry => [entry.id, String(entry.content ?? '')]))
+    const content = Array.isArray(inputMessage?.content) ? inputMessage.content : []
+    const currentInput = content.filter(part => part?.type === 'text').map(part => String(part.text ?? '')).join('\n')
+    return {
+      conversationId, sessionId, turn: current.turn,
+      inputMessageId: current.inputMessageId ?? inputMessage?.id,
+      inputEventSeq,
+      operationId: String(current.operationId),
+      modelSnapshot: structuredClone(current.model ?? {}),
+      worldSnapshot: { variables, settings, settingLibrary: editableSettingLibrary, baseHash: current.worldHash },
+      contextSnapshot: {
+        characterId: details.metadata?.characterId ?? details.metadata?.character?.id ?? '',
+        characterName: details.metadata?.characterName ?? details.metadata?.character?.name ?? '',
+        persona: structuredClone(details.metadata?.characterPersona ?? details.metadata?.persona ?? {}),
+        history, currentUserInput: currentInput, settingLibrary: runtimeSettingLibrary
+      },
+      attachments: content.filter(part => part?.type === 'image' || part?.type === 'file').map(part => structuredClone(part)),
+      inputSource: inputMessage?.source,
+      userTurnOrdinal: history.filter(item => item.role === 'user').length + 1,
+      // Cooldowns and between-turn state checkpoints only count runs whose input is still on the surface.
+      activeInputMessageIds: activeUserInputIds(
+        events.filter(event => Number.isSafeInteger(inputEventSeq) && event.seq < inputEventSeq),
+        inputMessage ?? (current.inputMessageId ? { id: String(current.inputMessageId), source: { kind: 'user' } } : undefined)
+      ),
+      mountedPresetId: ctx.agentPresets.composedPreset(agent.ctx)
+    }
+  }
   async function restrictAgentCapabilities(agentCtx, member, run, snapshot, scheduled) {
-    const allowed = allowedGroupsForAgent(member, run.rootAvailableGroups, run.productDisabledGroups)
-    const names = declaration => declaration?.name ?? declaration?.function?.name ?? ''
-    const denied = new Set(agentCtx.tools.schemas().flatMap(declaration => {
-      const name = names(declaration)
-      if (!name) return []
-      if (name.startsWith('rp_team_')) return scheduled ? [] : [name]
-      if (name === 'eleckoi_capability_probe' || name === 'eleckoi_read_uploaded_file') return []
-      return allowed.has(capabilityForDeclaration(declaration)) ? [] : [name]
-    }))
-    if (denied.size === 0) return undefined
-    const restrictable = agentCtx.tools.view(scopeOf(agentCtx)).restrictableNames
-    const namesToRestrict = [...denied].filter(name => restrictable.has(name))
-    const disposers = []
-    if (namesToRestrict.length) disposers.push(agentCtx.tools.restrict({ deny: namesToRestrict }))
-    if (typeof agentCtx.tools.guard === 'function') {
-      disposers.push(agentCtx.tools.guard(execution => denied.has(execution.name)
-        ? `Tool "${execution.name}" is not authorized by this agent's capabilities.` : undefined))
-    }
-    if (!disposers.length) return undefined
-    return () => { for (const dispose of disposers.reverse()) dispose() }
+    return restrictMemberTools(agentCtx, {
+      member, rootGroups: run.rootAvailableGroups, productDisabled: run.productDisabledGroups,
+      scheduled
+    })
   }
 
-  async function beginRun({ sessionId, turn, snapshot, rootSnapshot, rootAgent, claimedMessages, config, parameterValues = {}, configRevision, disabledToolGroupIds }) {
+  async function beginRun({ sessionId, turn, snapshot, rootAgent, claimedMessages, config, parameterValues = {}, configRevision, disabledToolGroupIds }) {
     if (disposing || disposed) return undefined
     const templateConfig = structuredClone(config)
     const resolvedParameters = resolveAuthorParameters(config, parameterValues)
@@ -400,60 +502,63 @@ export function createRpAgentTeam(ctx, dependencies) {
     await validateAgentModelRoutes(config, ctx.llm)
     const conversationId = String(snapshot.conversationId)
     await recoveryReady
+    await reconcileBranch(conversationId)
     const pendingAuthorEdits = stateStore.pendingAuthorEdits(conversationId)
     if (pendingAuthorEdits.length) {
       throw teamError('RP_TEAM_AUTHOR_EDIT_PENDING', 'Resolve the pending author edit before starting another Team run')
     }
     const previousRun = latestRun(conversationId)
-    if (previousRun?.phase === 'awaiting_commit') {
+    if (isAwaitingProductReceipt(previousRun)) {
       const receipt = await settlePendingReceipt(previousRun)
       persistRun(previousRun)
       if (['pending', 'unknown'].includes(receipt?.outcome)) {
         throw teamError('RP_TEAM_COMMIT_PENDING', 'The prior Team response still has no definitive product receipt')
       }
     }
-    const conversationWork = { conversationId, kind: 'team', workId: String(sessionId) }
-    if (typeof ctx.eleckoiStoryState.beginConversationWork !== 'function'
-      || typeof ctx.eleckoiStoryState.endConversationWork !== 'function') {
-      throw teamError('RP_TEAM_WORK_LOCK_UNAVAILABLE', 'Host cannot coordinate Team work with authoring edits')
-    }
-    await ctx.eleckoiStoryState.beginConversationWork(conversationWork)
-    let retainedWorkLock = false
-    try {
     const runId = randomUUID()
-    const worldSnapshot = snapshot.worldSnapshot ?? await ctx.eleckoiStoryState.snapshot({ conversationId })
-    const baseHash = worldSnapshot.baseHash
-    const prepared = await ctx.eleckoiStoryState.prepare(worldSnapshot, [], { conversationId, runId, baseHash })
-    const destinationSnapshot = {
-      ...structuredClone(rootSnapshot), ...structuredClone(snapshot),
-      conversationId, model: structuredClone(snapshot.modelSnapshot),
-      contextFile: snapshot.sourceContextFile,
-      variableBridge: prepared.variableBridge, settingBridge: prepared.settingBridge
+    const worldSnapshot = snapshot.worldSnapshot
+    if (!worldSnapshot || typeof snapshot.operationId !== 'string' || !snapshot.operationId) {
+      throw teamError('RP_TEAM_CURRENT_TURN_INVALID', 'Prepared product turn is missing its public world snapshot or operation identity')
     }
-    const sourceContextFile = snapshot.sourceContextFile
-    const conversation = structuredClone(snapshot.contextSnapshot ?? readOptionalJson(sourceContextFile, {}))
+    const baseHash = worldSnapshot.baseHash
+    const conversation = structuredClone(snapshot.contextSnapshot ?? {})
+    const destinationSnapshot = {
+      ...structuredClone(snapshot), conversationId,
+      model: structuredClone(snapshot.modelSnapshot)
+    }
     const binding = {
       conversationId, rootSessionId: String(sessionId), enabled: true, revision: configRevision,
       config: structuredClone(config), templateConfig, parameterValues: structuredClone(resolvedParameters.values),
-      resolvedHash: resolvedParameters.resolvedHash, sourceContextFile,
+      resolvedHash: resolvedParameters.resolvedHash,
       productDisabledGroups: [...disabledToolGroupIds]
     }
     const initialState = { world: { variables: structuredClone(worldSnapshot.variables ?? {}), settings: structuredClone(worldSnapshot.settings ?? {}) } }
-    const userMessage = [...(claimedMessages ?? [])].reverse().find(message => message?.role === 'user' && message?.source?.kind === 'user')
+    const userMessage = [...(claimedMessages ?? [])].reverse().find(message => message?.role === 'user'
+      && String(message.id ?? '') === String(snapshot.inputMessageId ?? ''))
     if (!userMessage) return undefined
     const requestId = userMessage.source?.rpcId ?? snapshot.inputSource?.rpcId
     const content = Array.isArray(userMessage.content) ? userMessage.content : []
     const currentInput = String(conversation.currentUserInput
       ?? content.filter(part => part?.type === 'text').map(part => String(part.text ?? '')).join('\n'))
     const contextFingerprint = fingerprint({ conversationId, currentInput, history: conversation.history ?? [], baseHash })
+    let retryIntentId
     let retryIntent
-    if (requestId) {
-      retryIntent = pendingRetry.get(String(requestId))
+    const stagedRetry = [...pendingRetry.entries()].find(([, intent]) => intent.conversationId === conversationId
+      && intent.targetEventSeq === snapshot.inputEventSeq)
+    if (stagedRetry) [retryIntentId, retryIntent] = stagedRetry
+    else if (requestId) {
+      retryIntentId = String(requestId)
+      retryIntent = pendingRetry.get(retryIntentId)
+    }
+    if (retryIntent) {
+      // A save that leaves the effective configuration unchanged (such as switching the team off and on) keeps the retry valid.
+      const sameConfig = retryIntent.configStoreRevision === binding.revision
+        || (retryIntent.resolvedHash !== undefined && retryIntent.resolvedHash === binding.resolvedHash)
       if (retryIntent && (retryIntent.conversationId !== conversationId
-        || retryIntent.configStoreRevision !== binding.revision || retryIntent.baseHash !== baseHash
+        || !sameConfig || retryIntent.baseHash !== baseHash
         || retryIntent.contextFingerprint !== contextFingerprint)) {
-        pendingRetry.delete(String(requestId))
-        throw teamError('RP_TEAM_RETRY_CONTEXT_CHANGED', 'Retry context, story state, or configuration changed; retry intent was discarded')
+        pendingRetry.delete(retryIntentId)
+        throw teamError('RP_TEAM_RETRY_CONTEXT_CHANGED', 'Retry context, world state, or configuration changed; retry intent was discarded')
       }
     }
     const manualAgentIds = retryIntent?.memberIds ?? pruneManualSelection(conversationId, binding.config)
@@ -468,8 +573,6 @@ export function createRpAgentTeam(ctx, dependencies) {
       templateConfig: binding.templateConfig, parameterValues: binding.parameterValues,
       resolvedHash: binding.resolvedHash, runId: String(runId), manualAgentIds
     })
-    run.conversationWork = conversationWork
-    run.workLockReleased = false
     run.binding = binding
     run.configStoreRevision = binding.revision
     run.requestId = requestId ? String(requestId) : undefined
@@ -478,6 +581,7 @@ export function createRpAgentTeam(ctx, dependencies) {
     run.userTurnOrdinal = Number.isSafeInteger(snapshot.userTurnOrdinal) ? snapshot.userTurnOrdinal : undefined
     run.branchId = snapshot.branchId === undefined ? undefined : String(snapshot.branchId)
     run.activeInputMessageIds = [...new Set((snapshot.activeInputMessageIds ?? []).map(String))]
+    run.operationId = snapshot.operationId
     run.inputEventSeq = snapshot.inputEventSeq ?? findInputEventSeq(rootAgent?.session, userMessage, requestId)
     run.modelSnapshot = structuredClone(snapshot.modelSnapshot)
     run.contextSnapshot = structuredClone(conversation)
@@ -486,11 +590,10 @@ export function createRpAgentTeam(ctx, dependencies) {
     run.baseState = structuredClone(initialState)
     run.baseHash = baseHash
     run.destinationSnapshot = destinationSnapshot
-    run.sourceContextFile = sourceContextFile
     run.rawConversationContext = conversation
     run.currentInput = currentInput
     run.attachments = (snapshot.attachments ?? content.filter(part => part?.type === 'image' || part?.type === 'file')).map(part => structuredClone(part))
-    run.rootAvailableGroups = await configuredGroups(destinationSnapshot, binding.config)
+    run.rootAvailableGroups = await configuredGroups(destinationSnapshot, binding.config, rootAgent)
     if (disposing || disposed) return undefined
     run.productDisabledGroups = new Set(binding.productDisabledGroups)
     run.dataDir = runDataDirectory(binding.conversationId, run.runId)
@@ -505,7 +608,6 @@ export function createRpAgentTeam(ctx, dependencies) {
     run.pendingPrepared = null
     run.pendingChildren = new Map()
     run.childSessionIds = []
-    run.activationBases = new Map()
     run.publicationFinalized = false
     run.scheduler = null
     run.schedulerPromise = null
@@ -531,7 +633,8 @@ export function createRpAgentTeam(ctx, dependencies) {
         .map(([id]) => id))
       run.messages = structuredClone((source.communication?.allMessages() ?? source.messages ?? [])
         .filter(message => preservedSenders.has(message.from)))
-      replayStateWrites(run, source.preservedStateWrites ?? [])
+      // Members that run again (including the publisher) write afresh; replaying their old writes would apply them twice.
+      replayStateWrites(run, writesToReplayOnRetry(source.preservedStateWrites, run.retryAgentIds))
       run.stateTransaction = stateStore.status({ conversationId: run.conversationId, runId: run.runId })
       for (const [id, previous] of Object.entries(source.members ?? {})) {
         if (previous.status === 'complete' && id !== run.outputAgentId && !retryIntent.memberIds.includes(id)) {
@@ -544,7 +647,7 @@ export function createRpAgentTeam(ctx, dependencies) {
           } })
         }
       }
-      pendingRetry.delete(String(requestId))
+      pendingRetry.delete(retryIntentId)
     }
     run.rawConversationContext = conversation
     run.sources = makeSources(run, conversation)
@@ -580,11 +683,11 @@ export function createRpAgentTeam(ctx, dependencies) {
     })
     runs.set(run.runId, run)
     latestRunByConversation.set(run.conversationId, run.runId)
+    pruneSettledRuns(run.conversationId)
     activeRunBySession.set(String(sessionId), run.runId)
     bindingsBySession.set(String(sessionId), binding)
     bindingsByConversation.set(run.conversationId, binding)
     controllers.set(run.runId, new AbortController())
-    retainedWorkLock = true
     bindingsByConversation.set(conversationId, binding)
     if (!retryIntent) writeManualSelection(binding.conversationId, [])
     setRunPhase(run, 'working')
@@ -598,9 +701,6 @@ export function createRpAgentTeam(ctx, dependencies) {
     record(run, { type: 'run.started', data: { configRevision: run.configRevision, outputAgentId: run.outputAgentId, categories: [] } })
     persistRun(run)
     return run
-    } finally {
-      if (!retainedWorkLock) await ctx.eleckoiStoryState.endConversationWork(conversationWork)
-    }
   }
 
   async function executeSchedule(run) {
@@ -734,6 +834,8 @@ export function createRpAgentTeam(ctx, dependencies) {
   }
 
   function assertBudgetAvailable(run) {
+    // Once the Host acknowledged the staged reply no further model work happens; the budget must not discard it.
+    if (run.productStageReceipt && !run.budgetFailure) return
     const failure = run.budget?.checkElapsed() ?? run.budgetFailure
     if (failure || run.budgetFailure) throw run.budgetFailure ?? failure
   }
@@ -758,7 +860,7 @@ export function createRpAgentTeam(ctx, dependencies) {
     const wasAwaitingCommit = run.phase === 'awaiting_commit'
     run.budgetFailure = error
     run.budgetFailureDetails = { ...details }
-    failRun(run, error)
+    if (!run.productCommitStaged) failRun(run, error)
     record(run, { type: 'activation.blocked', data: {
       reason: `budget:${details.kind}`, limit: details.limit
     } })
@@ -787,9 +889,13 @@ export function createRpAgentTeam(ctx, dependencies) {
     return run.budgetDrainPromise
   }
 
-  function closeRunBudget(run) {
+  function stopBudgetDeadline(run) {
     if (run.budgetTimer !== undefined) clearTimeout(run.budgetTimer)
     run.budgetTimer = undefined
+  }
+
+  function closeRunBudget(run) {
+    stopBudgetDeadline(run)
     if (run.budget) {
       run.budgetSnapshot = run.budget.snapshot()
       run.budget.close()
@@ -912,13 +1018,143 @@ export function createRpAgentTeam(ctx, dependencies) {
     })()
   }
 
+  function runForSession(sessionId) {
+    const id = String(sessionId ?? '')
+    const runId = activeRunBySession.get(id) ?? childBindings.get(id)?.runId
+      ?? [...runs.values()].find(candidate => candidate.sessionOwners?.has(id))?.runId
+    return runId ? runs.get(String(runId)) : undefined
+  }
+
+  function captureModelInput(run, options) {
+    const sessionId = String(options?.sessionId ?? '')
+    if (!sessionId || !Array.isArray(options?.messages)) return
+    const step = latestStepBySession.get(sessionId)
+    const turn = Number.isSafeInteger(step?.turn) ? step.turn : (sessionId === run.rootSessionId ? run.turn : undefined)
+    const stepNo = Number.isSafeInteger(step?.step) ? step.step : undefined
+    const key = stableJson([sessionId, turn, stepNo])
+    run.modelInputOrdinals ??= {}
+    const ordinal = (run.modelInputOrdinals[key] ?? 0) + 1
+    run.modelInputOrdinals[key] = ordinal
+    const requestId = String(options.requestId ?? `${sessionId}:${turn ?? 'unknown'}:${stepNo ?? 'unknown'}:${ordinal}`)
+    const context = options.messages.flatMap((message, originalOrder) => {
+      if (!message || typeof message !== 'object' || !['system', 'developer', 'user', 'assistant', 'tool'].includes(message.role)) return []
+      if (['analysis', 'reasoning', 'private_reasoning'].includes(String(message.channel ?? message.kind ?? '').toLowerCase())) return []
+      const content = safeRequestContent(message.content)
+      return [{
+        order: originalOrder,
+        ...(typeof message.id === 'string' ? { messageId: message.id } : {}),
+        role: message.role,
+        ...(typeof message.kind === 'string' ? { kind: message.kind } : {}),
+        ...(typeof message.title === 'string' ? { title: redactRequestText(message.title) } : {}),
+        ...(message.source && typeof message.source === 'object' ? { source: safeRequestIdentity(message.source) } : {}),
+        ...(message.anchor && typeof message.anchor === 'object' ? { anchor: safeRequestIdentity(message.anchor) } : {}),
+        content
+      }]
+    })
+    record(run, { type: 'model.input', agentId: run.sessionOwners?.get(sessionId)?.agentId ?? run.outputAgentId,
+      data: {
+        sessionId, ...(turn === undefined ? {} : { turn }), ...(stepNo === undefined ? {} : { step: stepNo }),
+        requestId, provider: options.provider, model: options.model,
+        ...(options.purpose ? { purpose: options.purpose } : {}),
+        ...(sessionId === run.rootSessionId && options.provider === TEAM_DELIVERY_PROVIDER ? { localDelivery: true } : {}),
+        ...(step?.eventSeq !== undefined ? { stepStartSeq: step.eventSeq } : {}),
+        context
+      } })
+    persistRunSoon(run)
+  }
+
+  function safeRequestContent(content) {
+    if (typeof content === 'string') return redactRequestText(content)
+    if (!Array.isArray(content)) return ''
+    return content.flatMap(part => {
+      if (!part || typeof part !== 'object') return []
+      if (part.type === 'text') return [{ type: 'text', text: redactRequestText(part.text ?? '') }]
+      if (part.type === 'tool-call') return [{ type: 'tool-call', name: redactRequestText(part.name ?? ''), arguments: redactRequestText(JSON.stringify(part.arguments ?? {})) }]
+      if (part.type === 'tool-result') return [{ type: 'tool-result', name: redactRequestText(part.name ?? ''), content: redactRequestText(typeof part.content === 'string' ? part.content : JSON.stringify(part.content ?? '')) }]
+      if (part.type === 'image') return [{ type: 'image' }]
+      return []
+    })
+  }
+
+  function safeRequestIdentity(value) {
+    const keys = ['kind', 'type', 'id', 'rpcId', 'messageId', 'sessionId', 'seq', 'turn', 'name']
+    return Object.fromEntries(keys.filter(key => ['string', 'number'].includes(typeof value[key]))
+      .map(key => [key, typeof value[key] === 'string' ? redactRequestText(value[key]) : value[key]]))
+  }
+
+  function redactRequestText(value) {
+    return String(value)
+      .replace(/\b["']?(api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password)["']?\s*([:=])\s*["']?([^\s,"'};]+)["']?/giu, '$1$2[redacted]')
+      .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/giu, 'Bearer [redacted]')
+      .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/gu, '[redacted credential]')
+  }
+
   function stateValue(value) {
     return value === undefined ? { known: true, present: false } : { known: true, present: true, value: structuredClone(value) }
   }
 
   async function deliverScheduledRun(options) {
-    const runId = activeRunBySession.get(String(options.sessionId))
-    const run = runId ? runs.get(runId) : undefined
+    const sessionId = String(options.sessionId ?? '')
+    let runId = activeRunBySession.get(sessionId)
+    let run = runId ? runs.get(runId) : undefined
+    if (!run) {
+      const pending = pendingRootSteps.get(sessionId)
+      const step = latestStepBySession.get(sessionId)
+      if (!pending?.routeSelected || Number(pending.turn) !== Number(step?.turn)) {
+        throw teamError('RP_TEAM_RUN_NOT_ACTIVE', 'The local delivery route has no matching admitted root turn')
+      }
+      const current = await ctx.eleckoiConversationsApi.currentTurn({ sessionId })
+      if (!current || String(current.sessionId ?? '') !== sessionId
+        || Number(current.turn) !== Number(pending.turn)
+        || String(current.operationId ?? '') !== pending.operationId
+        || String(current.conversationId ?? '') !== String(pending.conversationId ?? '')) {
+        throw teamError('RP_TEAM_CURRENT_TURN_INVALID', 'Host could not confirm the admitted local-delivery turn identity')
+      }
+      const userMessage = [...pending.messages].reverse().find(message => isRootInputMessage(message)
+        && String(message.id ?? '') === String(current.inputMessageId ?? ''))
+      if (!current.inputMessageId || !userMessage) {
+        throw teamError('RP_TEAM_CURRENT_TURN_INVALID', 'Host input identity does not match the captured root user message')
+      }
+      await recoveryReady
+      const saved = store.get(current.conversationId)
+      if (!saved.enabled || saved.revision !== pending.configRevision) {
+        throw teamError('RP_TEAM_CONFIG_CHANGED', 'The enabled Team configuration changed before local delivery began')
+      }
+      const proposedModel = pending.modelSnapshot
+      if (current.model && proposedModel && !sameFrozenModel(current.model, proposedModel)) {
+        throw teamError('RP_TEAM_MODEL_CHANGED', 'The prepared product model changed before local delivery began')
+      }
+      const agent = pending.agent ?? ctx.agents.get(sessionId)
+      if (!agent) throw teamError('RP_TEAM_ROOT_NOT_READY', 'Root DSH Agent is not available at local delivery')
+      const snapshot = await capturePreparedTurn(current, agent, options.signal ?? pending.signal)
+      const actualModel = current.model ? freezeProposedModel(current.model) : proposedModel
+      if (!actualModel || isTeamDeliveryModel(actualModel)) {
+        throw teamError('RP_TEAM_MODEL_INVALID', 'Host did not provide the actual product model for local delivery')
+      }
+      snapshot.modelSnapshot = {
+        ...(proposedModel ?? {}),
+        ...actualModel,
+        ...(actualModel.reasoningEffort === undefined && proposedModel?.reasoningEffort !== undefined
+          ? { reasoningEffort: proposedModel.reasoningEffort } : {})
+      }
+      run = await beginRun({
+        sessionId, turn: pending.turn, snapshot, rootAgent: agent, claimedMessages: pending.messages,
+        config: saved.config, parameterValues: saved.parameterValues, configRevision: saved.revision,
+        disabledToolGroupIds: agent.session.header?.disabledToolGroupIds ?? []
+      })
+      if (!run) throw teamError('RP_TEAM_CURRENT_TURN_INVALID', 'Captured root input could not start the Team run')
+      pendingRootSteps.delete(sessionId)
+      if (Number.isSafeInteger(pending.localDeliveryRequestSeq)) {
+        run.localDeliveryRequestSeq = pending.localDeliveryRequestSeq
+        record(run, { type: 'publication.local_delivery_route', agentId: run.outputAgentId, data: {
+          sessionId, turn: run.turn, requestHeaderSeq: pending.localDeliveryRequestSeq,
+          provider: TEAM_DELIVERY_PROVIDER, model: TEAM_DELIVERY_MODEL
+        } })
+        persistRun(run)
+      }
+      captureModelInput(run, options)
+      runId = run.runId
+    }
     if (!run || run.phase !== 'working') throw teamError('RP_TEAM_RUN_NOT_ACTIVE', 'No active Team run owns this local delivery request')
     run.rootSignal = options.signal
     if (!run.deliveryPromise) {
@@ -984,12 +1220,13 @@ export function createRpAgentTeam(ctx, dependencies) {
     const route = await resolveAgentModel(agent, run.modelSnapshot, ctx.llm)
     const presetId = await resolveAgentPreset({
       agent, parentPresetId: run.destinationSnapshot.mountedPresetId, model: route, llm: ctx.llm,
-      agentPresets: ctx.agentPresets, parseYaml, cache: registeredPresets
+      agentPresets: ctx.agentPresets, parseYaml, cache: registeredPresets,
+      persistDefinition: persistDerivedAgentPreset
     })
     const allowedGroups = allowedGroupsForAgent(agent, run.rootAvailableGroups, run.productDisabledGroups)
     const activationKey = fingerprint(`${run.runId}\u0000${agent.id}`).slice(0, 24)
     const marker = `rp-agent-team-activation:${activationKey}:${activationNo}`
-    const childData = createChildContextData({ run, agent, activationNo, stateStore })
+    const childData = createChildContextData({ run, agent, stateStore })
     run.pendingChildren.set(marker, {
       marker, agentId: agent.id, activationNo, activation, route, presetId,
       activationState: childData.activationState,
@@ -1001,8 +1238,6 @@ export function createRpAgentTeam(ctx, dependencies) {
     void waiter.promise.catch(() => {})
     run.pendingChildren.get(marker).waiter = waiter
     const prompt = childPrompt(agent, run, childData.agentContext, activationNo, run.pendingChildren)
-    childData.projected.currentPromptText = prompt[0].text
-    writeJsonAtomic(childData.contextFile, childData.projected)
     for (const attachment of childData.attachments) prompt.push(attachment)
     record(run, { type: 'context.selected', agentId: agent.id, data: { categories: childData.agentContext.categories } })
     persistRun(run)
@@ -1025,7 +1260,6 @@ export function createRpAgentTeam(ctx, dependencies) {
         activation.terminalResult = handoffTerminalResult(run, agent.id, executionId,
           activation.requestId, ctx.agents.get(childSessionId)?.session, result)
       }
-      await stageNativeBranchChanges(run, childBindings.get(childSessionId))
       const member = run.members[agent.id]
       member.status = 'complete'
       persistRun(run)
@@ -1081,19 +1315,11 @@ export function createRpAgentTeam(ctx, dependencies) {
     const binding = {
       runId: run.runId, agentId: pending.agentId, activation: pending.activationNo,
       executionId: execution.executionId, depth: pending.activation.depth,
-      sessionId: session, marker, name, route: structuredClone(pending.route)
+      sessionId: session, marker, name, route: structuredClone(pending.route), presetId: pending.presetId
     }
     if (!run.childSessionIds.includes(session)) run.childSessionIds.push(session)
     childBindings.set(session, binding)
     pending.waiter?.bind?.(session)
-    run.activationBases.set(session, {
-      state: structuredClone(pending.activationState),
-      versions: structuredClone(pending.activationVersions),
-      world: {
-        variables: structuredClone(readOptionalJson(pending.variableStateFile, { state: {} }).state ?? {}),
-        settings: bridgeSettingFiles(readOptionalJson(pending.settingStateFile, { library: {} }).library)
-      }
-    })
     persistRun(run)
     return true
   }
@@ -1101,29 +1327,30 @@ export function createRpAgentTeam(ctx, dependencies) {
   function onSessionEvent(session, event) {
     if (disposed || !event || typeof event.type !== 'string') return
     const sessionId = String(session?.id ?? session?.sessionId ?? '')
+    if (event.type === 'turn/end' && Number(pendingRootSteps.get(sessionId)?.turn) === Number(event.data?.turn)) {
+      restoreRootSelection(pendingRootSteps.get(sessionId))
+      pendingRootSteps.delete(sessionId)
+    }
+    if (event.type === 'step/start') {
+      latestStepBySession.set(sessionId, { turn: event.data?.turn, step: event.data?.step, eventSeq: event.seq })
+    }
+    const pendingRoot = pendingRootSteps.get(sessionId)
+    const headerConfig = event.type === 'request/header' ? event.data?.header?.config : undefined
+    if (pendingRoot?.routeSelected && Number(latestStepBySession.get(sessionId)?.turn) === Number(pendingRoot.turn)
+      && headerConfig?.provider === TEAM_DELIVERY_PROVIDER && headerConfig?.model === TEAM_DELIVERY_MODEL) {
+      pendingRoot.localDeliveryRequestSeq = event.seq
+    }
     const rootRunId = activeRunBySession.get(sessionId)
     const rootRun = rootRunId ? runs.get(rootRunId) : undefined
     if (rootRun && sessionId === rootRun.rootSessionId && event.type === 'request/header'
       && event.data?.header?.config?.provider === TEAM_DELIVERY_PROVIDER
       && event.data?.header?.config?.model === TEAM_DELIVERY_MODEL) {
       rootRun.localDeliveryRequestSeq = event.seq
+      record(rootRun, { type: 'publication.local_delivery_route', agentId: rootRun.outputAgentId, data: {
+        sessionId, turn: rootRun.turn, requestHeaderSeq: event.seq,
+        provider: event.data.header.config.provider, model: event.data.header.config.model
+      } })
       persistRun(rootRun)
-      const callback = ctx.eleckoiRuntimeExtensions?.recordLocalDelivery
-      if (typeof callback !== 'function') {
-        rootRun.localDeliveryMarkerError = teamError('RP_TEAM_LOCAL_ROUTE_MARKER_UNAVAILABLE', 'Host cannot durably mark the internal Team delivery route')
-        rootRun.localDeliveryMarkerPromise = Promise.reject(rootRun.localDeliveryMarkerError)
-      } else {
-        rootRun.localDeliveryMarkerPromise = Promise.resolve(callback({
-          sessionId, requestSeq: event.seq, provider: event.data.header.config.provider, model: event.data.header.config.model
-        })).catch(error => {
-          rootRun.localDeliveryMarkerError = error instanceof Error ? error : new Error(String(error))
-          throw rootRun.localDeliveryMarkerError
-        })
-      }
-      void rootRun.localDeliveryMarkerPromise.catch(error => {
-        rootRun.localDeliveryMarkerError = error instanceof Error ? error : new Error(String(error))
-        persistRun(rootRun)
-      })
       return
     }
     if (rootRun && sessionId === rootRun.rootSessionId && event.type === 'user/message') {
@@ -1152,17 +1379,17 @@ export function createRpAgentTeam(ctx, dependencies) {
     if (rootRun && sessionId === rootRun.rootSessionId && event.type === 'turn/end'
       && Number(event.data?.turn) === rootRun.turn) {
       const failure = childTurnEndError(event.data ?? {})
-      if (failure || rootRun.phase !== 'complete') {
-        void settleFailedRun(rootRun,
-          rootRun.budgetFailure ? 'failed' : event.data?.reason?.kind === 'aborted' || event.data?.outcome === 'cancelled' ? 'cancelled' : 'failed',
-          failure ?? new Error('Root Session ended before the Team product commit completed'))
-          .catch(error => { rootRun.settlementError = String(error?.message ?? error); persistRun(rootRun) })
-      }
+      if (rootRun.productCommitStaged) void settleEndedTurn(rootRun, event.data ?? {}, failure)
+        .catch(error => { rootRun.settlementError = String(error?.message ?? error); persistRun(rootRun) })
+      else if (failure || rootRun.phase !== 'complete') void settleFailedRun(rootRun,
+        rootRun.budgetFailure ? 'failed' : event.data?.reason?.kind === 'aborted' || event.data?.outcome === 'cancelled' ? 'cancelled' : 'failed',
+        failure ?? new Error('Root Session ended before Team publication was staged'))
+        .catch(error => { rootRun.settlementError = String(error?.message ?? error); persistRun(rootRun) })
       return
     }
     let binding = childBindings.get(sessionId)
     if (!binding) {
-      const rootId = String(session?.parentSessionId ?? session?.parentAgent?.session?.id ?? '')
+      const rootId = String(session?.header?.parentSession ?? session?.parentSessionId ?? session?.parentAgent?.session?.id ?? '')
       const run = runs.get(activeRunBySession.get(rootId))
       const row = run && nativeMember(rootId, sessionId)
       const pending = row && pendingChildFor(run, row.description)
@@ -1184,6 +1411,7 @@ export function createRpAgentTeam(ctx, dependencies) {
     const usage = actualTokenUsage(event)
     if (usage) captureUsage(run, binding, event, usage)
     if (event.type === 'turn/end') {
+      latestStepBySession.delete(sessionId)
       finishExecutionSession(run, sessionId, event.data?.reason?.kind === 'aborted' ? 'cancelled' : childTurnEndError(event.data ?? {}) ? 'failed' : 'complete', event.seq)
       persistRun(run)
     }
@@ -1222,7 +1450,7 @@ export function createRpAgentTeam(ctx, dependencies) {
       type: 'model.usage', agentId: binding.agentId,
       data: { provider: member.model?.provider, model: member.model?.model, requestSequence: event.seq, ...usage }
     })
-    persistRun(run)
+    persistRunSoon(run)
   }
 
   function ownedChildSessions(rootSessionId, conversationId) {
@@ -1239,6 +1467,19 @@ export function createRpAgentTeam(ctx, dependencies) {
       }
     }
     return ids
+  }
+
+  async function excludeOwnedSettledNotices(sessionId, conversationId, messages, signal) {
+    if (!messages.some(message => message?.source?.kind === 'subagent-settled')) return messages
+    if (!conversationId) {
+      const matches = (await ctx.eleckoiConversationsApi.list(signal))
+        .filter(item => String(item.runtimeSessionId ?? '') === sessionId)
+      if (matches.length !== 1) return messages
+      conversationId = String(matches[0].id ?? '')
+    }
+    if (!conversationId) return messages
+    const childIds = ownedChildSessions(sessionId, conversationId)
+    return messages.filter(message => !isOwnedSettledNotice(message, childIds))
   }
 
   function updateSchedulerTrace(run, event) {
@@ -1263,67 +1504,20 @@ export function createRpAgentTeam(ctx, dependencies) {
     record(run, event)
   }
 
-  async function stageNativeBranchChanges(run, binding) {
-    if (!binding) return
-    const pending = run.pendingChildren.get(binding.marker)
-    if (!pending) return
-    const member = agentById(run.config, binding.agentId)
-    const nativeVars = readOptionalJson(pending.variableStateFile, {})
-    const nativeSettings = readOptionalJson(pending.settingStateFile, {})
-    const activationBase = run.activationBases.get(binding.sessionId)
-    const beforeVariables = activationBase?.world?.variables ?? {}
-    const afterVariables = nativeVars.state ?? {}
-    const stateChanges = []
-    if (canWriteNativeNamespace(member, 'variables')) {
-      for (const change of diffLeaves(beforeVariables, afterVariables)) {
-        stateChanges.push({ namespace: 'world', path: `/variables${change.path}`, removed: change.removed, value: change.value })
-      }
-    }
-    const beforeSettings = activationBase?.world?.settings ?? {}
-    const afterSettings = bridgeSettingFiles(nativeSettings.library)
-    if (canWriteNativeNamespace(member, 'settings')) {
-      for (const key of new Set([...Object.keys(beforeSettings), ...Object.keys(afterSettings)])) {
-        if (beforeSettings[key] === afterSettings[key]) continue
-        if (!Object.hasOwn(afterSettings, key)) throw teamError('RP_TEAM_STATE_DELETE_UNSUPPORTED', `Native setting deletion ${key} is not supported by this transaction`)
-        stateChanges.push({ namespace: 'world', path: `/settings/${escapePointer(key)}`, value: afterSettings[key] })
-      }
-    }
-    const beforeSnapshots = new Map()
-    for (const change of stateChanges) {
-      for (const snapshot of captureStateBefore(run, change.namespace, change.path)) {
-        if (!beforeSnapshots.has(snapshot.triggerId)) beforeSnapshots.set(snapshot.triggerId, snapshot)
-      }
-    }
-    for (const change of stateChanges) {
-      if (change.removed) await stageStateRemoval(run, member, change.namespace, change.path, activationBase)
-      else await stageStateChange(run, member, change.namespace, change.path, change.value, activationBase)
-    }
-    run.activationBases.delete(binding.sessionId)
-    await notifyStateChanged(run, [...beforeSnapshots.values()])
-  }
-
-  async function stageStateChange(run, member, namespace, path, value, activationBase) {
-    if (!member.outputAuthority.state) throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', `Agent ${member.id} has no state-write authority`)
-    const version = capturedVersion(activationBase, namespace, path)
-    const before = observeStatePath(stateStore, run, namespace, path)
-    stateStore.write({ conversationId: run.conversationId, runId: run.runId, agentId: member.id, namespace, path, value, expectedVersion: version })
-    record(run, { type: 'state.operation', agentId: member.id, data: { namespace, path, operation: 'write', version: version + 1, ...before, after: value, valuesRecorded: true } })
-  }
-
-  async function stageStateRemoval(run, member, namespace, path, activationBase) {
-    if (!member.outputAuthority.state) throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', `Agent ${member.id} has no state-write authority`)
-    const version = capturedVersion(activationBase, namespace, path)
-    const before = observeStatePath(stateStore, run, namespace, path)
-    stateStore.remove({ conversationId: run.conversationId, runId: run.runId, agentId: member.id, namespace, path, expectedVersion: version })
-    record(run, { type: 'state.operation', agentId: member.id, data: { namespace, path, operation: 'remove', version: version + 1, ...before, afterMissing: true, valuesRecorded: true } })
-  }
-
   async function cancelFromClient(conversationId, runId) {
     const run = requireConversationRun(conversationId, runId)
-    if (run.phase === 'awaiting_commit') {
+    // A finished run has nothing to stop; cancelling the root Session here would interrupt whatever runs on it now.
+    if (['failed', 'cancelled', 'complete'].includes(run.phase)) return runStatus(run)
+    if (isAwaitingProductReceipt(run)) {
       interruptChildren(run)
-      ctx.agents.get(run.rootSessionId)?.cancel({ kind: 'user' })
-      await settlePendingReceipt(run)
+      if (mayCancelRoot(run)) ctx.agents?.get(run.rootSessionId)?.cancel({ kind: 'user' })
+      const receipt = await settlePendingReceipt(run)
+      // Loaded from disk (no delivery in flight here) and the Host has no row for it: the stage never reached the Host,
+      // so nothing can commit it. An explicit cancel is the author's way out instead of a chat blocked for good.
+      if (receipt?.outcome === 'unknown' && !run.deliveryPromise) {
+        await settleRunFromReceipt(run, { outcome: 'cancelled', conversationId: run.conversationId, runId: run.runId,
+          error: 'Cancelled: the Host has no record of this staged turn' })
+      }
       persistRun(run)
       return runStatus(run)
     }
@@ -1331,7 +1525,7 @@ export function createRpAgentTeam(ctx, dependencies) {
     controllers.get(run.runId)?.abort(reason.message)
     await run.communication?.cancelAll(reason)
     interruptChildren(run)
-    const root = ctx.agents.get(run.rootSessionId)
+    const root = mayCancelRoot(run) ? ctx.agents?.get(run.rootSessionId) : undefined
     root?.cancel({ kind: 'user' })
     const pending = [run.deliveryPromise, run.schedulerPromise].filter(Boolean)
     if (pending.length) await Promise.allSettled(pending)
@@ -1355,9 +1549,7 @@ export function createRpAgentTeam(ctx, dependencies) {
     const root = ctx.agents.get(run.rootSessionId)
     if (root) {
       const ids = [...new Set(run.childSessionIds ?? [])]
-      if (ids.length && typeof ctx.subagents?.drainContinuableChildren === 'function') {
-        await ctx.subagents.drainContinuableChildren(root, ids)
-      }
+      if (ids.length) await ctx.subagents.drainChildren(root, ids)
     }
   }
 
@@ -1366,8 +1558,56 @@ export function createRpAgentTeam(ctx, dependencies) {
       return { outcome: run.productReceiptOutcome, productMessageId: run.productMessageId }
     }
     if (run.phase === 'complete') return { outcome: 'committed', productMessageId: run.productMessageId }
+    promoteStagedPublication(run)
     const receipt = await getProductCommitStatus({ conversationId: run.conversationId, runId: run.runId })
     return await settleRunFromReceipt(run, receipt)
+  }
+
+  function isAwaitingProductReceipt(run) {
+    return run?.phase === 'awaiting_commit'
+      || (run?.phase === 'publishing' && run.productCommitStaged === true)
+  }
+
+  function promoteStagedPublication(run) {
+    if (!run || run.phase !== 'publishing' || run.productCommitStaged !== true) return false
+    completeRun(run)
+    persistRun(run)
+    return true
+  }
+
+  async function pollTurnCommitStatus(run, { attempts = 30, intervalMs = 50 } = {}) {
+    let receipt
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      receipt = await getProductCommitStatus({ conversationId: run.conversationId, runId: run.runId })
+      if (!['pending', 'unknown'].includes(receipt?.outcome)) return receipt
+      if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, intervalMs))
+    }
+    return receipt
+  }
+
+  async function settleEndedTurn(run, eventData, failure) {
+    const receipt = await pollTurnCommitStatus(run)
+    if (['committed', 'failed', 'cancelled'].includes(receipt?.outcome)) {
+      await settleRunFromReceipt(run, receipt)
+      return receipt
+    }
+    if (run.productStageRejected !== undefined && receipt?.outcome === 'unknown') {
+      const local = { outcome: 'failed', conversationId: run.conversationId, runId: run.runId, error: run.productStageRejected }
+      await settleRunFromReceipt(run, local)
+      return local
+    }
+    const status = receipt?.outcome ?? 'unknown'
+    const detail = failure?.message ?? eventData?.error?.message ?? 'The official product save has no terminal receipt yet'
+    const key = `${status}\u0000${detail}`
+    if (run.lastCommitPendingKey !== key) {
+      run.lastCommitPendingKey = key
+      record(run, { type: 'publication.commit_pending', agentId: run.outputAgentId, data: {
+        status, reason: String(detail), sessionId: run.rootSessionId, turn: run.turn,
+        assistantSeq: run.assistantSeq, assistantMessageId: run.assistantMessageId
+      } })
+    }
+    persistRun(run)
+    return receipt
   }
 
   function registerTools(agentCtx, member, run, sessionId) {
@@ -1384,7 +1624,7 @@ export function createRpAgentTeam(ctx, dependencies) {
       captureStateBefore: run.captureStateBefore,
       notifyStateChanged: run.notifyStateChanged
     }
-    const disposers = [registerTeamTools(args)]
+    const disposers = [registerTeamTools(args), registerContextTools({ ...args, attachments: ctx.attachments })]
     if (run.config.memory?.collections?.length) disposers.push(registerMemoryTools(args))
     return () => { for (const dispose of disposers.reverse()) dispose?.() }
   }
@@ -1459,66 +1699,171 @@ export function createRpAgentTeam(ctx, dependencies) {
   async function finalizePublication(run) {
     assertBudgetAvailable(run)
     if (!run.publication) return
+    const signal = run.rootSignal ?? controllers.get(run.runId)?.signal
+    if (disposing || disposed || signal?.aborted) {
+      throw teamError('RP_TEAM_CANCELLED', String(signal?.reason?.message ?? signal?.reason ?? 'RP Agent Team runtime disposed'))
+    }
     run.publicationFinalized = true
     const transaction = stateStore.stage({ conversationId: run.conversationId, runId: run.runId })
     run.stateTransaction = transaction
-    const operations = storyOperations(transaction.writes, run.baseState)
+    const nextWorld = worldStateAfterWrites(run.worldSnapshot, transaction.writes)
+    const hostPayload = {
+      conversationId: run.conversationId,
+      operationId: run.operationId,
+      runId: run.runId,
+      expectedWorldHash: run.baseHash,
+      inputMessageId: run.inputMessageId,
+      ...(stableJson(nextWorld.variables) === stableJson(run.worldSnapshot.variables)
+        ? {} : { variableStateJson: JSON.stringify(nextWorld.variables) }),
+      ...(stableJson(nextWorld.settingLibrary) === stableJson(run.worldSnapshot.settingLibrary)
+        ? {} : { settingLibrary: nextWorld.settingLibrary }),
+      localDelivery: { provider: TEAM_DELIVERY_PROVIDER, model: TEAM_DELIVERY_MODEL }
+    }
+    let stageAttempted = false
     try {
-      await ctx.eleckoiStoryState.prepare(run.worldSnapshot, operations, {
-        conversationId: run.conversationId, runId: run.runId, baseHash: run.baseHash
-      })
-      assertBudgetAvailable(run)
-      await ctx.eleckoiStoryState.stageProductCommit({
-        conversationId: run.conversationId, runId: run.runId, sessionId: run.rootSessionId,
-        turn: run.turn, baseHash: run.baseHash, operations, body: run.publication.body
-      })
+      // Stage is the point after which the Host may still commit even if this
+      // process loses the local acknowledgement. Persist that uncertainty
+      // before crossing the Host boundary so cancellation cannot roll it back.
       run.productCommitStaged = true
+      record(run, { type: 'publication.stage_requested', agentId: run.outputAgentId, data: {
+        status: 'requested', operationId: run.operationId
+      } })
+      persistRun(run)
+      stageAttempted = true
+      const staged = await ctx.eleckoiConversationsApi.stageTurnState(hostPayload)
+      if (staged?.outcome !== 'pending' || String(staged.operationId ?? run.operationId) !== run.operationId) {
+        throw teamError('RP_TEAM_PRODUCT_STAGE_FAILED', 'Host did not acknowledge the staged product state for this prepared turn')
+      }
+      run.productStageReceipt = structuredClone(staged)
+      stopBudgetDeadline(run)
+      if (run.phase === 'publishing') completeRun(run)
       assertBudgetAvailable(run)
-      run.publication.operationCount = operations.length
-      completeRun(run)
+      run.publication.operationCount = transaction.writes.filter(write => write.namespace === 'world').length
       record(run, { type: 'publication.staged', agentId: run.outputAgentId, data: {
         status: 'staged', selectedProposalCount: run.publication.selectedDraftIds.length,
-        operationCount: operations.length, bodyCharacters: run.publication.body.length
+        operationCount: run.publication.operationCount, bodyCharacters: run.publication.body.length
       } })
       record(run, { type: 'publication.awaiting_commit', agentId: run.outputAgentId, data: { status: 'awaiting_commit' } })
       persistRun(run)
     } catch (error) {
-      rollbackState(run, error?.message ?? error)
+      if (!stageAttempted) {
+        run.productCommitStaged = false
+        rollbackState(run, error?.message ?? error)
+      } else {
+        // The Host call returned a rejection in this process. If the Host also has no turn row for this run,
+        // nothing can commit it any more; settleFailedRun treats that as a local failure instead of waiting.
+        // An abort or timeout says nothing about the Host side, which may still write the row; keep waiting then.
+        const inconclusive = ['AbortError', 'TimeoutError'].includes(error?.name) || /time(?:d)?\s?out/iu.test(String(error?.message ?? ''))
+        if (run.productStageReceipt === undefined && !inconclusive) run.productStageRejected = String(error?.message ?? error)
+        if (run.phase === 'publishing') completeRun(run)
+        persistRun(run)
+      }
       throw error
     }
   }
 
-  async function releaseConversationWork(run) {
-    if (!run.conversationWork || run.workLockReleased) return
-    await ctx.eleckoiStoryState.endConversationWork(run.conversationWork)
-    run.workLockReleased = true
+  function worldStateAfterWrites(baseWorld, writes) {
+    let variables = structuredClone(baseWorld.variables ?? {})
+    const settingWrites = writes.filter(item => item.namespace === 'world' && item.path.startsWith('/settings/'))
+    const settingLibrary = baseWorld.settingLibrary === null
+      ? (settingWrites.length ? { groups: [], entries: [] } : null)
+      : structuredClone(baseWorld.settingLibrary ?? { groups: [], entries: [] })
+    for (const write of writes.filter(item => item.namespace === 'world')) {
+      if (write.path.startsWith('/variables/')) {
+        const path = write.path.slice('/variables'.length)
+        if (write.operation === 'remove') removePointerValue(variables, path)
+        else variables = setPointerValue(variables, path, write.value)
+      } else if (write.path.startsWith('/settings/')) {
+        const entryId = decodeWorldSettingId(write.path)
+        const entry = settingLibrary?.entries?.find(item => item.id === entryId)
+        if (!entry) throw teamError('RP_TEAM_STATE_PATH_UNDEFINED', `Unknown SettingLibrary entry ${entryId}`)
+        entry.content = String(write.value)
+      } else {
+        throw teamError('RP_TEAM_STATE_PATH_INVALID', `Unsupported world state path ${write.path}`)
+      }
+    }
+    return { variables, settingLibrary }
+  }
+
+  function decodeWorldSettingId(path) {
+    const encoded = path.slice('/settings/'.length)
+    if (!encoded || encoded.includes('/')) throw teamError('RP_TEAM_STATE_PATH_INVALID', 'A SettingLibrary entry path must contain one stable entry ID')
+    return encoded.replace(/~1/gu, '/').replace(/~0/gu, '~')
+  }
+
+  function removePointerValue(value, pointer) {
+    const segments = pointer === '' ? [] : pointer.slice(1).split('/').map(part => part.replace(/~1/gu, '/').replace(/~0/gu, '~'))
+    if (!segments.length) throw teamError('RP_TEAM_STATE_PATH_INVALID', 'The world namespace root cannot be removed')
+    let current = value
+    for (const segment of segments.slice(0, -1)) {
+      if (!current || typeof current !== 'object' || !Object.hasOwn(current, segment)) return value
+      current = current[segment]
+    }
+    if (current && typeof current === 'object') delete current[segments.at(-1)]
+    return value
   }
 
   async function commitProductState(run, receipt) {
     run.triggerCooldownMarkers = structuredClone(run.triggerStarts ?? [])
     run.stateTransaction = stateStore.commit({
       conversationId: run.conversationId, runId: run.runId,
-      receipt: { outcome: 'committed', productMessageId: receipt.productMessageId }
+      receipt: { outcome: 'committed', productMessageId: receipt.assistantMessageId }
     })
-    commitRunState(run, 'committed', receipt.productMessageId)
+    commitRunState(run, 'committed', receipt.assistantMessageId)
     run.productReceiptOutcome = 'committed'
-    run.productMessageId = receipt.productMessageId
+    run.productMessageId = receipt.assistantMessageId
     run.assistantSeq = receipt.assistantSeq
     run.assistantMessageId = receipt.assistantMessageId
     record(run, { type: 'publication.committed', agentId: run.outputAgentId, data: {
-      status: 'committed', productMessageId: receipt.productMessageId,
+      status: 'committed', productMessageId: receipt.assistantMessageId,
       assistantSeq: receipt.assistantSeq, assistantMessageId: receipt.assistantMessageId
     } })
-    activeRunBySession.delete(run.rootSessionId)
+    releaseRun(run)
     controllers.delete(run.runId)
     closeRunBudget(run)
     cleanRunData(run)
     persistRun(run)
-    await releaseConversationWork(run)
+  }
+
+  /** Forget the Session mapping only while it still points at this run; a newer run may already own the Session. */
+  function releaseRun(run) {
+    if (activeRunBySession.get(run.rootSessionId) === run.runId) activeRunBySession.delete(run.rootSessionId)
+  }
+
+  /** Cancel the root Session only for this run, or when no other run owns it (for example after a plugin reload). */
+  function mayCancelRoot(run) {
+    const owner = activeRunBySession.get(run.rootSessionId)
+    return owner === undefined || owner === run.runId
   }
 
   async function settleRunFromReceipt(run, knownReceipt) {
-    const receipt = knownReceipt ?? await getProductCommitStatus({ conversationId: run.conversationId, runId: run.runId })
+    // A failed or cancelled run is final; a late poll must not roll back, record or release anything again.
+    if (['failed', 'cancelled'].includes(run.productReceiptOutcome) && ['failed', 'cancelled'].includes(run.phase)) {
+      return { outcome: run.productReceiptOutcome, conversationId: run.conversationId, runId: run.runId }
+    }
+    let receipt = knownReceipt ?? await getProductCommitStatus({ conversationId: run.conversationId, runId: run.runId })
+    // The Host rejected this run's stage and holds no row for it (also after a restart): it can never commit.
+    if (receipt?.outcome === 'unknown' && run.productStageRejected !== undefined) {
+      receipt = { outcome: 'failed', conversationId: run.conversationId, runId: run.runId, error: run.productStageRejected }
+    }
+    if (receipt.outcome === 'committed' && receipt.active === false) {
+      rollbackState(run, 'The committed output is no longer on the active Session branch')
+      run.productReceiptOutcome = 'committed'
+      run.productMessageId = receipt.assistantMessageId
+      run.assistantSeq = receipt.assistantSeq
+      run.assistantMessageId = receipt.assistantMessageId
+      if (run.phase === 'awaiting_commit') commitRunState(run, 'committed', receipt.assistantMessageId)
+      record(run, { type: 'publication.rewound', agentId: run.outputAgentId, data: {
+        sessionId: receipt.sessionId, turn: receipt.turn,
+        assistantSeq: receipt.assistantSeq, assistantMessageId: receipt.assistantMessageId
+      } })
+      closeRunBudget(run)
+      releaseRun(run)
+      controllers.delete(run.runId)
+      cleanRunData(run)
+      persistRun(run)
+      return receipt
+    }
     if (receipt.outcome === 'committed') {
       if (run.stateTransaction?.status !== 'committed') await commitProductState(run, receipt)
       return receipt
@@ -1536,21 +1881,27 @@ export function createRpAgentTeam(ctx, dependencies) {
         status: receipt.outcome, productMessageId: receipt.productMessageId, reason: run.failure,
         assistantSeq: run.assistantSeq, assistantMessageId: run.assistantMessageId
       } })
-      activeRunBySession.delete(run.rootSessionId)
+      releaseRun(run)
       controllers.delete(run.runId)
       cleanRunData(run)
       persistRun(run)
-      await releaseConversationWork(run)
     } else if (run.productCommitStaged && (receipt.outcome === 'pending' || receipt.outcome === 'unknown')) {
-      recordCommitFailure(run, receipt.outcome, new Error(run.failure ?? 'The product commit has not been confirmed'))
+      const key = `${receipt.outcome}\u0000pending`
+      if (run.lastCommitPendingKey !== key) {
+        run.lastCommitPendingKey = key
+        record(run, { type: 'publication.commit_pending', agentId: run.outputAgentId, data: {
+          status: receipt.outcome, sessionId: run.rootSessionId, turn: run.turn,
+          assistantSeq: run.assistantSeq, assistantMessageId: run.assistantMessageId
+        } })
+      }
       persistRun(run)
     }
     return receipt
   }
 
   function setReceiptFailure(run, receipt) {
-    if (receipt.reason !== undefined && receipt.reason !== null && String(receipt.reason).trim()) {
-      run.failure = String(receipt.reason)
+    if (receipt.error !== undefined && receipt.error !== null && String(receipt.error).trim()) {
+      run.failure = String(receipt.error)
     } else {
       run.failure ||= `Product receipt: ${receipt.outcome}`
     }
@@ -1570,72 +1921,38 @@ export function createRpAgentTeam(ctx, dependencies) {
       run.failure = String(error?.message ?? error)
       run.productReceiptOutcome = outcome
       rollbackState(run, run.failure)
-      activeRunBySession.delete(run.rootSessionId)
+      releaseRun(run)
       controllers.delete(run.runId)
       closeRunBudget(run)
       cleanRunData(run)
       persistRun(run)
-      await releaseConversationWork(run)
       return false
     }
-    let receipt
-    try {
-      receipt = await ctx.eleckoiStoryState.settleProductCommit({
-        conversationId: run.conversationId, runId: run.runId, outcome
+    const receipt = await pollTurnCommitStatus(run)
+    if (['committed', 'failed', 'cancelled'].includes(receipt?.outcome)) {
+      await settleRunFromReceipt(run, receipt)
+      return receipt.outcome === 'committed'
+    }
+    if (run.productStageRejected !== undefined && receipt?.outcome === 'unknown') {
+      // The stage call was rejected before the Host wrote a turn row: settle locally so the chat is not wedged.
+      await settleRunFromReceipt(run, {
+        outcome: outcome === 'cancelled' ? 'cancelled' : 'failed',
+        conversationId: run.conversationId, runId: run.runId,
+        error: run.productStageRejected
       })
-    } catch (settleError) {
-      receipt = await getProductCommitStatus({ conversationId: run.conversationId, runId: run.runId })
-      if (receipt.outcome === 'committed') {
-        await commitProductState(run, receipt)
-        return true
-      }
-      if (run.productCommitStaged && ['pending', 'unknown'].includes(receipt.outcome)) {
-        run.productReceiptOutcome = receipt.outcome
-        recordCommitFailure(run, receipt.outcome, error)
-        closeRunBudget(run)
-        persistRun(run)
-        return false
-      }
-      run.failure = String(error?.message ?? error)
-      if (run.productCommitStaged) recordCommitFailure(run, receipt?.outcome ?? outcome, error)
-      if (outcome === 'cancelled') cancelRunState(run, String(error?.message ?? error))
-      else failRun(run, error)
-      rollbackState(run, error?.message ?? error)
-      run.productReceiptOutcome = receipt?.outcome
-      activeRunBySession.delete(run.rootSessionId)
-      controllers.delete(run.runId)
-      closeRunBudget(run)
-      cleanRunData(run)
-      persistRun(run)
-      await releaseConversationWork(run)
-      throw new AggregateError([error, settleError], 'Team run failed and its product receipt could not be settled')
-    }
-    if (receipt?.outcome === 'committed') {
-      await commitProductState(run, receipt)
-      return true
-    }
-    if (run.productCommitStaged && ['pending', 'unknown'].includes(receipt?.outcome)) {
-      run.productReceiptOutcome = receipt.outcome
-      recordCommitFailure(run, receipt.outcome, error)
-      closeRunBudget(run)
-      persistRun(run)
       return false
     }
-    run.productReceiptOutcome = receipt?.outcome ?? outcome
-    run.failure = String(error?.message ?? error)
-    if (run.productCommitStaged) recordCommitFailure(run, receipt?.outcome ?? outcome, error)
-    if (receipt?.outcome === 'cancelled' || outcome === 'cancelled') cancelRunState(run, String(error?.message ?? error))
-    else failRun(run, error)
-    rollbackState(run, error?.message ?? error)
-    if (run.productCommitStaged) record(run, { type: 'publication.rolled_back', agentId: run.outputAgentId, data: {
-      status: receipt?.outcome ?? outcome, reason: run.failure,
-      assistantSeq: run.assistantSeq, assistantMessageId: run.assistantMessageId
-    } })
-    activeRunBySession.delete(run.rootSessionId)
-    controllers.delete(run.runId)
-    closeRunBudget(run)
+    const status = receipt?.outcome ?? 'unknown'
+    const reason = String(error?.message ?? error)
+    const key = `${status}\u0000${reason}`
+    if (run.lastCommitPendingKey !== key) {
+      run.lastCommitPendingKey = key
+      record(run, { type: 'publication.commit_pending', agentId: run.outputAgentId, data: {
+        status, reason, sessionId: run.rootSessionId, turn: run.turn,
+        assistantSeq: run.assistantSeq, assistantMessageId: run.assistantMessageId
+      } })
+    }
     persistRun(run)
-    await releaseConversationWork(run)
     return false
   }
 
@@ -1664,22 +1981,6 @@ export function createRpAgentTeam(ctx, dependencies) {
     if (activeRunBySession.get(run.rootSessionId) !== run.runId || ['cancelled', 'failed', 'complete'].includes(run.phase)) {
       throw teamError('RP_TEAM_TERMINAL', 'This RP Team run no longer accepts tool calls')
     }
-  }
-
-  async function authorizePresetTools({ sessionId, snapshot, presetToolNames = [] }) {
-    const id = String(sessionId)
-    const runId = snapshot?.rpTeamRunId ?? childBindings.get(id)?.runId
-    const run = runs.get(String(runId))
-    const memberId = snapshot?.rpTeamAgentId ?? childBindings.get(id)?.agentId
-    const member = run?.config.agents.find(item => item.id === memberId)
-    if (!run || !member) return []
-    const selected = allowedGroupsForAgent(member, run.rootAvailableGroups, run.productDisabledGroups)
-    if (!selected.has(NATIVE_PRESET_TOOLS)) return []
-    const presetId = snapshot?.mountedPresetId ?? member.presetId
-    if (!presetId || !(await nativePresetIds()).has(presetId)) return []
-    const declarations = await presetDeclarations(presetId)
-    const names = new Set(declarations.filter(item => capabilityForDeclaration(item) === NATIVE_PRESET_TOOLS).map(item => item.name))
-    return presetToolNames.filter(name => names.has(name))
   }
 
   async function getOptions(conversationId) {
@@ -1718,7 +2019,7 @@ export function createRpAgentTeam(ctx, dependencies) {
     const saved = store.get(conversationId)
     const binding = bindingsByConversation.get(String(conversationId)) ?? store.latestRuntimeBinding(conversationId)
     const run = latestRun(conversationId)
-    if (run?.phase === 'awaiting_commit') {
+    if (isAwaitingProductReceipt(run)) {
       await settlePendingReceipt(run)
       persistRun(run)
     }
@@ -1728,7 +2029,26 @@ export function createRpAgentTeam(ctx, dependencies) {
       configRevision: boundRevision, currentConfigRevision: binding.currentConfigRevision ?? saved.revision,
       stale: binding.stale ?? boundRevision !== saved.revision
     } : null
-    return { conversationId, binding: bindingDto, run: run ? runStatus(run) : null, manualAgentIds: readManualSelection(conversationId) }
+    const runDto = run ? runStatus(run) : null
+    if (runDto?.retryAvailable) {
+      const blocked = retryBlockedReason(run, saved)
+      if (blocked) Object.assign(runDto, { retryAvailable: false, retryBlockedReason: blocked })
+    }
+    return { conversationId, binding: bindingDto, run: runDto, manualAgentIds: readManualSelection(conversationId) }
+  }
+
+  /** Why the host would refuse or skip a retry of this run right now: the team is off, or its effective config changed. */
+  function retryBlockedReason(run, saved) {
+    if (!saved?.enabled) return 'disabled'
+    // Mirror the run-start gate: the same store revision, or else the same resolved configuration.
+    if (run.configStoreRevision !== undefined && run.configStoreRevision === saved.revision) return undefined
+    try {
+      const config = normalizeTeamConfig(saved.config)
+      const declared = new Set((config.authorParameters ?? []).map(parameter => parameter.id))
+      const values = Object.fromEntries(Object.entries(saved.parameterValues ?? {}).filter(([id]) => declared.has(id)))
+      const current = resolveAuthorParameters(config, values).resolvedHash
+      return run.resolvedHash !== undefined && current === run.resolvedHash ? undefined : 'config_changed'
+    } catch { return 'config_changed' }
   }
 
   function isConversationBusy(conversationId) {
@@ -1736,7 +2056,7 @@ export function createRpAgentTeam(ctx, dependencies) {
     if ([...runs.values()].some(run => run.conversationId === conversation
       && !['complete', 'failed', 'cancelled'].includes(run.phase))) return true
     if ([...pendingRetry.values()].some(intent => intent.conversationId === conversation)) return true
-    return loadRunRows(conversation).some(row => row.status?.phase === 'awaiting_commit')
+    return loadRunRows(conversation).some(row => isAwaitingProductReceipt(row.status))
   }
 
   function getRunRecords(conversationId) {
@@ -1755,8 +2075,9 @@ export function createRpAgentTeam(ctx, dependencies) {
     }).sort((left, right) => String(right.status?.startedAt).localeCompare(String(left.status?.startedAt)))
   }
 
-  async function configuredGroups(snapshot, config) {
-    const groups = new Set([...CAPABILITIES.map(([id]) => id), ...toolGroups(ctx.tools.schemas?.() ?? [])])
+  async function configuredGroups(snapshot, config, rootAgent) {
+    const toolScope = rootAgent?.ctx ? scopeOf(rootAgent.ctx) : undefined
+    const groups = new Set([...CAPABILITIES.map(([id]) => id), ...toolGroups(ctx.tools.schemas?.(toolScope) ?? [])])
     const ids = new Set([snapshot?.mountedPresetId, ...config.agents.map(agent => agent.presetId)].filter(Boolean))
     const registered = await nativePresetIds()
     for (const id of ids) if (registered.has(id)) for (const group of await groupsForPreset(id, snapshot)) groups.add(group)
@@ -1796,6 +2117,7 @@ export function createRpAgentTeam(ctx, dependencies) {
     }
     stateStore.importCommittedBaseline({ conversationId, runId: row.status.runId, snapshot: stateBaselineBefore })
     writeJsonAtomic(runFile(conversationId, row.status.runId), row)
+    runRowsCache.delete(String(conversationId))
     latestRunByConversation.delete(String(conversationId))
     return { imported: true, runId: row.status.runId, status: structuredClone(row.status) }
   }
@@ -1822,12 +2144,15 @@ export function createRpAgentTeam(ctx, dependencies) {
       throw teamError('RP_TEAM_RETRY_UNAVAILABLE', 'Retry requires a failed run with either a definitive product receipt or no staged body, plus its original user event')
     }
     if (typeof requestId !== 'string' || !requestId.trim()) throw teamError('RP_TEAM_INVALID_REQUEST', 'requestId is required for retry')
+    const blocked = retryBlockedReason(source, store.get(conversationId))
+    if (blocked === 'disabled') throw teamError('RP_TEAM_RETRY_DISABLED', 'Turn the team on before retrying this round')
+    if (blocked === 'config_changed') throw teamError('RP_TEAM_RETRY_CONTEXT_CHANGED', 'The team configuration changed since this round; a retry would reuse the old configuration')
     const failed = Object.entries(source.members).filter(([, item]) => ['failed', 'cancelled'].includes(item.status)).map(([id]) => id)
     const selected = memberIds?.length ? [...new Set(memberIds)] : failed
     if (!selected.length || selected.some(id => !failed.includes(id))) throw teamError('RP_TEAM_RETRY_NOT_FAILED', 'Retry can target only failed or cancelled agents')
     const intent = {
       conversationId, sourceRunId: source.runId, requestId, targetEventSeq: source.inputEventSeq,
-      memberIds: selected, configStoreRevision: source.configStoreRevision, baseHash: source.baseHash,
+      memberIds: selected, configStoreRevision: source.configStoreRevision, resolvedHash: source.resolvedHash, baseHash: source.baseHash,
       contextFingerprint: source.contextFingerprint
     }
     if (pendingRetry.has(requestId)) throw teamError('RP_TEAM_RETRY_REQUEST_EXISTS', 'A retry intent already uses this requestId')
@@ -1853,6 +2178,21 @@ export function createRpAgentTeam(ctx, dependencies) {
     return { ...row.status, ...traceAssociation(row), configuration: row.config, events: structuredClone(row.trace?.events ?? []) }
   }
 
+  /**
+   * Keeps the newest few runs of a chat in memory. Older settled runs (with no write pending) live only on disk,
+   * where every lookup (status, retry, traces) already falls back to, so a long session does not grow without bound.
+   */
+  function pruneSettledRuns(conversationId, keep = 5) {
+    const own = [...runs.values()].filter(item => item.conversationId === conversationId)
+      .sort((left, right) => String(right.startedAt).localeCompare(String(left.startedAt)))
+    for (const item of own.slice(keep)) {
+      const settled = ['complete', 'failed', 'cancelled'].includes(item.phase)
+        && item.persistTimer === undefined && activeRunBySession.get(item.rootSessionId) !== item.runId
+        && !controllers.has(item.runId)
+      if (settled) runs.delete(item.runId)
+    }
+  }
+
   function latestRun(conversationId) {
     const cached = runs.get(latestRunByConversation.get(conversationId))
     if (cached) return cached
@@ -1872,75 +2212,58 @@ export function createRpAgentTeam(ctx, dependencies) {
   }
 
   async function getProductCommitStatus(input) {
-    return await ctx.eleckoiStoryState.getProductCommitStatus(input)
+    return await ctx.eleckoiConversationsApi.turnCommitStatus(input)
   }
 
-  async function prepareConversationRestore({ conversationId, sessionId, fromTurn, beforeEventSeq }) {
-    await recoveryReady
+  async function reconcileBranch(conversationId) {
     const conversation = String(conversationId)
-    const cutoffSeq = Number.isSafeInteger(beforeEventSeq) ? beforeEventSeq : undefined
-    const cutoffTurn = Number.isSafeInteger(fromTurn) ? fromTurn : undefined
-    if (cutoffSeq === undefined && cutoffTurn === undefined) {
-      throw teamError('RP_TEAM_RESTORE_TARGET_REQUIRED', 'A Session event sequence or turn is required to restore Team state')
-    }
-    const includesTarget = row => cutoffSeq !== undefined
-      ? Number.isSafeInteger(row.status?.inputEventSeq) && row.status.inputEventSeq >= cutoffSeq
-      : Number.isSafeInteger(row.status?.turn) && row.status.turn >= cutoffTurn
-    const belongsToSession = row => !sessionId || String(row.rootSessionId) === String(sessionId)
-    const isRewound = row => row.trace?.events?.some(event => event.type === 'publication.rewound') === true
-    let affected = loadRunRows(conversation).filter(row => belongsToSession(row) && !isRewound(row) && includesTarget(row)
-      && (row.status?.phase === 'complete' || row.status?.phase === 'awaiting_commit'))
-    for (const row of affected.filter(item => item.status.phase === 'awaiting_commit')) {
+    await recoveryReady
+    let rows = loadRunRows(conversation)
+    for (const row of rows.filter(item => isAwaitingProductReceipt(item.status))) {
+      const run = runs.get(String(row.status.runId)) ?? loadRuntimeForRetry(conversation, row.status.runId)
+      promoteStagedPublication(run)
       const receipt = await getProductCommitStatus({ conversationId: conversation, runId: row.status.runId })
-      if (receipt.outcome === 'pending' || receipt.outcome === 'unknown') {
-        throw teamError('RP_TEAM_COMMIT_PENDING', 'Cannot rewind while a Team publication has no definitive receipt')
+      if (['committed', 'failed', 'cancelled'].includes(receipt?.outcome)) {
+        await settleRecoveredRun(conversation, row.status.runId, receipt)
+      } else if (run) {
+        await settleRunFromReceipt(run, receipt)
       }
-      await settleRecoveredRun(conversation, row.status.runId, receipt)
     }
-    // A recovered committed receipt changes an awaiting row into a complete
-    // run. Re-read after settlement so this very rewind uses its checkpoint.
-    affected = loadRunRows(conversation).filter(row => belongsToSession(row) && !isRewound(row) && includesTarget(row)
-      && (row.status?.phase === 'complete' || row.status?.phase === 'awaiting_commit'))
-    const committed = affected.filter(row => row.status?.phase === 'complete'
-      && row.status?.runId && row.status?.productMessageId)
-      .sort((left, right) => {
-        const leftOrder = left.status.inputEventSeq ?? Number.MAX_SAFE_INTEGER
-        const rightOrder = right.status.inputEventSeq ?? Number.MAX_SAFE_INTEGER
-        return leftOrder - rightOrder || String(left.status.startedAt).localeCompare(String(right.status.startedAt))
-      })
-    if (!committed.length) return { apply() {}, rollback() {} }
-    const targetRunId = String(committed[0].status.runId)
-    const before = stateStore.committedSnapshot({ conversationId: conversation })
+    rows = loadRunRows(conversation)
+    const isRewound = row => row.trace?.events?.some(event => event.type === 'publication.rewound') === true
+    const inactive = []
+    // A rewind or edit removes a suffix of the conversation (the baseline restore below relies on that too), so scan
+    // committed runs newest first and stop at the first one still active: one Host call per turn in the usual case.
+    const committed = rows.filter(item => item.status?.productCommitStaged && item.status?.phase === 'complete' && !isRewound(item))
+      .sort((left, right) => (right.status.inputEventSeq ?? -1) - (left.status.inputEventSeq ?? -1)
+        || (right.status.turn ?? -1) - (left.status.turn ?? -1)
+        || String(right.status.startedAt).localeCompare(String(left.status.startedAt)))
+    for (const row of committed) {
+      const receipt = await getProductCommitStatus({ conversationId: conversation, runId: row.status.runId })
+      if (receipt?.outcome === 'committed' && receipt.active === false) inactive.push({ row, receipt })
+      else if (receipt?.outcome === 'committed' && receipt.active === true) break
+    }
+    if (!inactive.length) return { reconciled: false, runIds: [] }
+    inactive.sort((left, right) => {
+      const leftSeq = left.row.status.inputEventSeq ?? Number.MAX_SAFE_INTEGER
+      const rightSeq = right.row.status.inputEventSeq ?? Number.MAX_SAFE_INTEGER
+      return leftSeq - rightSeq || (left.row.status.turn ?? Number.MAX_SAFE_INTEGER) - (right.row.status.turn ?? Number.MAX_SAFE_INTEGER)
+        || String(left.row.status.startedAt).localeCompare(String(right.row.status.startedAt))
+    })
+    const targetRunId = String(inactive[0].row.status.runId)
     const baseline = stateStore.committedBaseline({ conversationId: conversation, runId: targetRunId })
-    const originalTraces = committed.map(row => [String(row.status.runId), structuredClone(row.trace)])
-    let applied = false
-    return {
-      apply() {
-        if (applied) return
-        stateStore.restoreCommittedSnapshot({ conversationId: conversation, snapshot: baseline })
-        for (const row of committed) {
-          const run = loadRuntimeForRetry(conversation, row.status.runId)
-          if (!run) continue
-          run.trace ??= createTrace(run.runId, run.startedAt)
-          record(run, { type: 'publication.rewound', agentId: run.outputAgentId, data: {
-            targetEventSeq: cutoffSeq, targetTurn: cutoffTurn, sessionId
-          } })
-          persistRun(run)
-        }
-        applied = true
-      },
-      rollback() {
-        if (!applied) return
-        stateStore.restoreCommittedSnapshot({ conversationId: conversation, snapshot: before })
-        for (const [runId, trace] of originalTraces) {
-          const run = runs.get(runId) ?? loadRuntimeForRetry(conversation, runId)
-          if (!run) continue
-          run.trace = structuredClone(trace)
-          persistRun(run)
-        }
-        applied = false
-      }
+    stateStore.restoreCommittedSnapshot({ conversationId: conversation, snapshot: baseline })
+    for (const { row, receipt } of inactive) {
+      const run = runs.get(String(row.status.runId)) ?? loadRuntimeForRetry(conversation, row.status.runId)
+      if (!run) continue
+      run.trace ??= createTrace(run.runId, run.startedAt)
+      record(run, { type: 'publication.rewound', agentId: run.outputAgentId, data: {
+        sessionId: receipt.sessionId, turn: receipt.turn,
+        assistantSeq: receipt.assistantSeq, assistantMessageId: receipt.assistantMessageId
+      } })
+      persistRun(run)
     }
+    return { reconciled: true, runIds: inactive.map(item => String(item.row.status.runId)) }
   }
 
   async function settleRecoveredRun(conversationId, runId, receipt) {
@@ -1952,11 +2275,6 @@ export function createRpAgentTeam(ctx, dependencies) {
       run.stateTransaction = stateStore.stage({ conversationId, runId })
     }
     await settleRunFromReceipt(run, receipt)
-  }
-
-  function capturedVersion(activationBase, namespace, path) {
-    if (!activationBase?.versions) throw teamError('RP_TEAM_STATE_VERSION_REQUIRED', `No activation-start version was captured for ${namespace}${path}`)
-    return versionForPath(activationBase.versions, namespace, path)
   }
 
   function replayStateWrites(run, writes) {
@@ -1983,25 +2301,6 @@ export function createRpAgentTeam(ctx, dependencies) {
     }
   }
 
-  function restrictManagedStateTools(agentCtx, agent) {
-    const deny = []
-    if (!canReadNativeNamespace(agent, 'variables')) deny.push(...VARIABLE_READ_TOOLS)
-    if (!canWriteNativeNamespace(agent, 'variables')) deny.push(...VARIABLE_WRITE_TOOLS)
-    if (!canReadNativeNamespace(agent, 'settings')) deny.push(...SETTING_READ_TOOLS)
-    if (!canWriteNativeNamespace(agent, 'settings')) deny.push(...SETTING_WRITE_TOOLS)
-    const scope = scopeOf(agentCtx)
-    const restrictableNames = agentCtx.tools.view(scope).restrictableNames
-    const disposers = []
-    const restrictableDeny = deny.filter(name => restrictableNames.has(name))
-    if (restrictableDeny.length) disposers.push(agentCtx.tools.restrict({ deny: restrictableDeny }))
-    if (deny.length && typeof agentCtx.tools.guard === 'function') {
-      disposers.push(agentCtx.tools.guard(execution => deny.includes(execution.name)
-        ? `Tool "${execution.name}" is forbidden by this agent's state permissions.` : undefined))
-    }
-    if (!disposers.length) return undefined
-    return () => { for (const dispose of disposers.reverse()) dispose() }
-  }
-
   function rollbackState(run, reason) {
     const current = stateStore.status({ conversationId: run.conversationId, runId: run.runId })
     const status = current.status
@@ -2016,7 +2315,17 @@ export function createRpAgentTeam(ctx, dependencies) {
 
   function persistRun(run) {
     if (!run.trace || !run.config) return
+    if (run.persistTimer !== undefined) { clearTimeout(run.persistTimer); run.persistTimer = undefined }
     writeJsonAtomic(runFile(run.conversationId, run.runId), persistedRunValue(run))
+    runRowsCache.delete(String(run.conversationId))
+  }
+
+  /** High-frequency updates (usage chunks, model inputs) are written at most every 250 ms; any phase change writes at once. */
+  function persistRunSoon(run) {
+    if (disposing || disposed) { persistRun(run); return }
+    if (run.persistTimer !== undefined) return
+    run.persistTimer = setTimeout(() => { run.persistTimer = undefined; persistRun(run) }, 250)
+    run.persistTimer.unref?.()
   }
 
   function record(run, event) {
@@ -2030,8 +2339,21 @@ export function createRpAgentTeam(ctx, dependencies) {
     return readRunRecord(conversationId, runId)
   }
 
+  // Parsed run rows per conversation; every write through this runtime drops the entry, so reads stay current.
   function loadRunRows(conversationId) {
-    return readRunRows(traceRoot, conversationId)
+    const key = String(conversationId)
+    // Writing a run file (temp file + rename) changes the directory's mtime, which also catches writes from another
+    // runtime instance, such as one still draining after a reload.
+    let stamp = -1
+    try { stamp = statSync(conversationTraceDirectory(traceRoot, key)).mtimeMs } catch {}
+    const cached = runRowsCache.get(key)
+    if (cached?.stamp === stamp && stamp !== -1) return [...cached.rows]
+    const rows = readRunRows(traceRoot, key)
+    runRowsCache.delete(key)
+    runRowsCache.set(key, { stamp, rows })
+    // Only the few chats in use stay parsed; traces can be large.
+    while (runRowsCache.size > 4) runRowsCache.delete(runRowsCache.keys().next().value)
+    return [...rows]
   }
 
   function readRunRecord(conversationId, runId) {
@@ -2043,6 +2365,8 @@ export function createRpAgentTeam(ctx, dependencies) {
     if (!row) return undefined
     const run = hydrateRun(row, { conversationId })
     applySavedFields(run, row)
+    // Settling a run loaded from disk cleans its data directory like a live one.
+    run.dataDir ??= runDataDirectory(conversationId, run.runId)
     return run
   }
 
@@ -2056,6 +2380,7 @@ export function createRpAgentTeam(ctx, dependencies) {
 
   function applySavedFields(run, row) {
     applySavedRunFields(run, row)
+    if (row.status?.productCommitStaged === true) run.productCommitStaged = true
   }
 
   function writeManualSelection(conversationId, agentIds) {
@@ -2088,6 +2413,7 @@ export function createRpAgentTeam(ctx, dependencies) {
   function dispose() {
     if (disposePromise) return disposePromise
     disposing = true
+    for (const run of runs.values()) if (run.persistTimer !== undefined) persistRun(run)
     const active = [...runs.values()].filter(run => !['complete', 'failed', 'cancelled'].includes(run.phase))
     const awaitingCommit = active.filter(run => run.phase === 'awaiting_commit')
     const working = active.filter(run => run.phase !== 'awaiting_commit')
@@ -2098,39 +2424,47 @@ export function createRpAgentTeam(ctx, dependencies) {
     }
     disposePromise = Promise.allSettled([
       ...awaitingCommit.map(async run => {
-        try {
-          await settlePendingReceipt(run)
-          persistRun(run)
-        } finally {
-          await releaseConversationWork(run)
+        const pending = [run.deliveryPromise, run.schedulerPromise].filter(Boolean)
+        if (pending.length) await Promise.allSettled(pending)
+        await drainContinuableChildren(run)
+        if (!['committed', 'failed', 'cancelled'].includes(run.productReceiptOutcome)) {
+          await settleRunFromReceipt(run, await pollTurnCommitStatus(run))
         }
+        persistRun(run)
       }),
       ...working.map(async run => {
-        try {
-          await run.communication?.cancelAll('RP Agent Team runtime disposed')
-          const pending = [run.deliveryPromise, run.schedulerPromise].filter(Boolean)
-          if (pending.length) await Promise.allSettled(pending)
-          await drainContinuableChildren(run)
-        } finally {
+        await Promise.allSettled([run.communication?.cancelAll('RP Agent Team runtime disposed')])
+        const pending = [run.deliveryPromise, run.schedulerPromise].filter(Boolean)
+        if (pending.length) await Promise.allSettled(pending)
+        await Promise.allSettled([drainContinuableChildren(run)])
+        if (['committed', 'failed', 'cancelled'].includes(run.productReceiptOutcome)) {
+          persistRun(run)
+        } else if (run.productCommitStaged || run.phase === 'awaiting_commit') {
+          try {
+            await settleRunFromReceipt(run, await pollTurnCommitStatus(run))
+          } catch (error) {
+            run.settlementError = String(error?.message ?? error)
+            persistRun(run)
+          }
+        } else {
           cancelRunState(run, 'RP Agent Team runtime disposed')
           rollbackState(run, 'RP Agent Team runtime disposed')
           persistRun(run)
-          await releaseConversationWork(run)
         }
       })
     ]).then(async () => {
+      await ready.catch(() => undefined)
       await disposeRegisteredAgentPresets(registeredPresets)
       deliveryRegistration()
     }).finally(() => {
       disposed = true
       for (const run of runs.values()) closeRunBudget(run)
-      disposeSessionEvents?.()
-      disposeBudgetStream?.()
+      uninstallNativeHooks?.()
     })
     return disposePromise
   }
 
-  return { api, extension, dispose, authoring }
+  return { api, dispose, authoring, ready, install }
 
   function runFile(conversationId, runId) { return runFilePath(traceRoot, conversationId, runId) }
   function conversationTraceDirectory(conversationId) { return conversationTraceDirectoryPath(traceRoot, conversationId) }
@@ -2328,6 +2662,44 @@ function agentById(config, id) {
 }
 
 function allows(configured, value) { return configured.includes('*') || configured.includes(value) }
+
+function sessionMessage(event) {
+  return event?.type === 'user/message' ? event.data : event?.data?.message
+}
+
+function isRootInputMessage(message) {
+  return message?.role === 'user' && message.source?.kind === 'user'
+    && typeof message.id === 'string' && message.id.length > 0
+}
+
+function freezeProposedModel(config, parameters = config) {
+  if (typeof config?.provider !== 'string' || !config.provider
+    || typeof config?.model !== 'string' || !config.model) {
+    throw teamError('RP_TEAM_MODEL_INVALID', 'Native request did not propose a provider and model to freeze')
+  }
+  return {
+    provider: config.provider,
+    model: config.model,
+    ...(typeof config.reasoningEffort === 'string' ? { reasoningEffort: config.reasoningEffort } : {}),
+    ...(Number.isFinite(parameters?.temperature) ? { temperature: parameters.temperature } : {}),
+    ...(Number.isFinite(parameters?.topP) ? { topP: parameters.topP } : {}),
+    ...(Number.isSafeInteger(parameters?.maxTokens) && parameters.maxTokens > 0 ? { maxTokens: parameters.maxTokens } : {})
+  }
+}
+
+function isTeamDeliveryModel(config) {
+  return config?.provider === TEAM_DELIVERY_PROVIDER && config?.model === TEAM_DELIVERY_MODEL
+}
+
+function modelSelection({ provider, model, reasoningEffort }) {
+  return { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }
+}
+
+function sameFrozenModel(left, right) {
+  return left?.provider === right?.provider && left?.model === right?.model
+    && (left?.reasoningEffort === undefined || right?.reasoningEffort === undefined
+      || left.reasoningEffort === right.reasoningEffort)
+}
 
 function assistantText(message) {
   if (typeof message?.content === 'string') return message.content

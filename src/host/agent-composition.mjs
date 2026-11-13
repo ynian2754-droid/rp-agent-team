@@ -32,7 +32,7 @@ export async function resolveAgentModel(agent, inherited, llm) {
   return model
 }
 
-export async function resolveAgentPreset({ agent, parentPresetId, model, llm, agentPresets, parseYaml, cache }) {
+export async function resolveAgentPreset({ agent, parentPresetId, model, llm, agentPresets, parseYaml, cache, persistDefinition }) {
   const baseId = agent.presetId || parentPresetId
   if (!baseId) throw teamError('RP_TEAM_PRESET_REQUIRED', `No native Agent preset is available for ${agent.name}`)
   if (agent.compaction.autoCompactTokenLimit === undefined) return baseId
@@ -41,16 +41,28 @@ export async function resolveAgentPreset({ agent, parentPresetId, model, llm, ag
   if (!contextWindow || agent.compaction.autoCompactTokenLimit > contextWindow) {
     throw teamError('RP_TEAM_INVALID_COMPACTION', `${agent.name} compaction threshold exceeds the model context window`)
   }
-  const id = `rp-team-${fingerprint({ baseId, agentId: agent.id, agent, limit: agent.compaction.autoCompactTokenLimit }).slice(0, 24)}`
+  const document = await agentPresets.readDocument(baseId)
+  const recipe = {
+    baseId, baseContent: document.content, baseContentHash: fingerprint(document.content),
+    baseName: document.name ?? baseId,
+    agentId: agent.id, autoCompactTokenLimit: agent.compaction.autoCompactTokenLimit, contextWindow
+  }
+  const id = derivedPresetId(recipe)
+  recipe.id = id
   if (!cache.has(id)) {
-    const pending = createDerivedPreset({
-      id, baseId, thresholdRatio: agent.compaction.autoCompactTokenLimit / contextWindow, agentPresets, parseYaml
-    })
+    const pending = (async () => {
+      await persistDefinition?.(recipe)
+      return await agentPresets.register(derivedPresetDefinition(recipe, parseYaml))
+    })()
     cache.set(id, pending)
     pending.catch(() => cache.delete(id))
   }
   await cache.get(id)
   return id
+}
+
+export function restoreRegisteredAgentPreset(recipe, { agentPresets, parseYaml }) {
+  return agentPresets.register(derivedPresetDefinition(recipe, parseYaml))
 }
 
 export async function disposeRegisteredAgentPresets(cache) {
@@ -61,18 +73,28 @@ export async function disposeRegisteredAgentPresets(cache) {
   cache.clear()
 }
 
-async function createDerivedPreset({ id, baseId, thresholdRatio, agentPresets, parseYaml }) {
-  const document = await agentPresets.readDocument(baseId)
-  const plugins = parseYaml(document.content)
-  if (!Array.isArray(plugins)) throw teamError('RP_TEAM_PRESET_INVALID', `Native preset ${baseId} is not an entry list`)
+function derivedPresetId(recipe) {
+  return `rp-team-${fingerprint({
+    baseId: recipe.baseId, baseContentHash: recipe.baseContentHash,
+    agentId: recipe.agentId, autoCompactTokenLimit: recipe.autoCompactTokenLimit,
+    contextWindow: recipe.contextWindow
+  }).slice(0, 24)}`
+}
+
+function derivedPresetDefinition(recipe, parseYaml) {
+  if (recipe.id !== derivedPresetId(recipe) || fingerprint(recipe.baseContent) !== recipe.baseContentHash) {
+    throw teamError('RP_TEAM_PRESET_INVALID', `Stored derived preset ${recipe.id} does not match its source`)
+  }
+  const plugins = parseYaml(recipe.baseContent)
+  if (!Array.isArray(plugins)) throw teamError('RP_TEAM_PRESET_INVALID', `Native preset ${recipe.baseId} is not an entry list`)
   const compaction = findPresetEntry(plugins, 'compaction-basic')
-  if (!compaction) throw teamError('RP_TEAM_COMPACTION_UNAVAILABLE', `Native preset ${baseId} has no compaction-basic plugin`)
+  if (!compaction) throw teamError('RP_TEAM_COMPACTION_UNAVAILABLE', `Native preset ${recipe.baseId} has no compaction-basic plugin`)
   compaction.config ??= {}
-  compaction.config.thresholdRatio = thresholdRatio
-  return await agentPresets.register({
-    id, name: `RP Team · ${document.name || baseId}`,
-    description: `Derived per-agent compaction from ${baseId}`, plugins
-  })
+  compaction.config.thresholdRatio = recipe.autoCompactTokenLimit / recipe.contextWindow
+  return {
+    id: recipe.id, name: `RP Team · ${recipe.baseName || recipe.baseId}`,
+    description: `Derived per-agent compaction from ${recipe.baseId}`, plugins
+  }
 }
 
 function fingerprint(value) {

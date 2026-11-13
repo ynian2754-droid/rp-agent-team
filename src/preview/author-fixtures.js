@@ -1,5 +1,17 @@
 // UI-only data. Runtime/CAS correctness is tested against the actual Host separately.
 import { normalizeTeamConfig } from '../shared/schema.mjs'
+/** Same shape as the host's `triggerChecks`. The fixture has no state, so a condition is reported as not met. */
+function fixtureTriggerChecks(agent,{nextUserTurn,manual,inputText}) {
+ return agent.triggers.map(trigger=>{
+  if(trigger.type==='always')return {type:'always',outcome:'run'}
+  if(trigger.type==='manual')return {type:'manual',outcome:manual.includes(agent.id)?'run':'skip'}
+  if(trigger.type==='requested_by_agent')return {type:'requested_by_agent',outcome:'on_request',from:[...(trigger.from??[])]}
+  if(trigger.type==='condition')return {type:'condition',outcome:'skip'}
+  if(trigger.type==='keyword')return {type:'keyword',outcome:trigger.keywords.some(word=>inputText.includes(word))?'run':'skip'}
+  if(trigger.type==='periodic'){const offset=trigger.offset??0;return {type:'periodic',outcome:nextUserTurn>=offset&&(nextUserTurn-offset)%trigger.every===0?'run':'skip',every:trigger.every,offset,ordinal:nextUserTurn}}
+  return {type:trigger.type,outcome:'on_event'}
+ })
+}
 export function authorFixtureMethods(conversations) {
  const library=new Map(),states=new Map()
  const current=id=> {
@@ -9,7 +21,13 @@ export function authorFixtureMethods(conversations) {
  const record=config=>({id:config.id,version:config.version,hash:`ui-${config.version}`,config:structuredClone(config)})
  return {
   getContextCatalog:()=>({version:'fixture-source',anchor:null,busy:false,sources:[{type:'character_card',fields:[{path:'/name',label:'姓名',type:'string'},{path:'/persona/name',label:'角色名字',type:'string'}]},{type:'current_input',fields:[{path:'/text',label:'输入文字',type:'string'}]}]}),
-  previewConfig:p=>({configHash:'ui',sourceVersion:'fixture-source',anchor:null,issues:[],members:p.config.agents.map(agent=>({id:agent.id,name:agent.name,triggered:agent.triggers.some(x=>x.type==='always'||x.type==='manual'&&p.manualAgentIds?.includes(agent.id)),reasons:['配置检查'],context:{current_input:{text:p.inputText}},permissions:{stateRules:agent.statePermissions},tools:agent.capabilities,dependencies:agent.execution.after,missingSelections:[],dynamic:['模型的实际请求由运行时决定'],issues:[]}))}),
+  previewConfig:p=>{
+   const nextUserTurn=(conversations[p.conversationId]?.turn??0)+1
+   return {configHash:'ui',sourceVersion:'fixture-source',anchor:null,issues:[],nextUserTurn,members:p.config.agents.map(agent=>{
+    const triggerChecks=fixtureTriggerChecks(agent,{nextUserTurn,manual:p.manualAgentIds??[],inputText:p.inputText??''})
+    return {id:agent.id,name:agent.name,triggered:triggerChecks.some(check=>check.outcome==='run'),triggerChecks,reasons:['配置检查'],context:{current_input:{text:p.inputText}},permissions:{stateRules:agent.statePermissions},tools:agent.capabilities,dependencies:agent.execution.after,missingSelections:[],dynamic:['模型的实际请求由运行时决定'],issues:[]}
+   })}
+  },
   getState:p=>{const data=current(p.conversationId);return p.agentId?{...data,values:[]}:data},
   listStateCheckpoints:p=>({checkpoints:[{id:'ui-checkpoint',label:'第 1 轮',anchor:current(p.conversationId).anchor,values:[{namespace:'shared',path:'/feeling',value:'calm',missing:false}],branchStatus:'current',canRewind:false}]}),
   applyStateEdit:p=>{const data=current(p.conversationId);if(p.expectedRevision!==data.revision)throw new Error('状态已改变，请重新读取。');for(const operation of p.operations){const row=data.values.find(x=>x.namespace===operation.namespace&&x.path===operation.path);row.value=operation.operation==='reset'?row.initial:operation.value;row.missing=operation.operation==='remove'}data.revision++;states.set(p.conversationId,data);return {status:'committed',operationId:p.operationId,state:data}},

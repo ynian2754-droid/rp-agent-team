@@ -1,0 +1,139 @@
+{
+  "ok": true,
+  "userDataRoot": "C:\\Users\\O4\\Desktop\\agent rp team\\output\\v041-events-native",
+  "scenarios": [
+    {
+      "name": "automatic-compaction",
+      "requestCount": 4,
+      "compactionRequests": 2,
+      "reportedTokens": 20,
+      "nativeCompactionEvents": [
+        "compaction/start",
+        "compaction/summary",
+        "compaction/end",
+        "compaction/start",
+        "compaction/end"
+      ]
+    },
+    {
+      "name": "deadline-cancels-inflight",
+      "conversationId": "64b1790e-d4ec-43d3-84e7-371c7f95e763",
+      "runId": "29c8773f-e432-419a-8ee2-e8c175810112",
+      "budget": {
+        "limits": {
+          "maxElapsedMs": 1000
+        },
+        "requestCount": 1,
+        "reportedTokens": 0,
+        "elapsedMs": 1099,
+        "reportedTokensKnown": false,
+        "failure": {
+          "code": "RP_TEAM_BUDGET_EXCEEDED",
+          "message": "RP Team elapsed-time budget exceeded (1045 ms of 1000 ms)",
+          "kind": "maxElapsedMs",
+          "limit": 1000,
+          "observed": 1045
+        }
+      },
+      "outcome": "failed_without_publication"
+    },
+    {
+      "name": "parallel-dispatch",
+      "conversationId": "60957b73-4730-4867-a86c-9ef1596489d5",
+      "runId": "767f5be7-47e1-40cb-82d5-9d82a9334118",
+      "budget": {
+        "limits": {
+          "maxRequests": 1
+        },
+        "requestCount": 1,
+        "reportedTokens": 0,
+        "elapsedMs": 197,
+        "reportedTokensKnown": false,
+        "failure": {
+          "code": "RP_TEAM_BUDGET_EXCEEDED",
+          "message": "RP Team model-request budget exceeded (2 requests of 1)",
+          "kind": "maxRequests",
+          "limit": 1,
+          "observed": 2
+        }
+      },
+      "outcome": "failed_without_publication",
+      "downstreamDispatches": 0,
+      "maxRequests": 1
+    },
+    {
+      "name": "one-request-succeeds",
+      "requestCount": 1,
+      "phase": "complete"
+    },
+    {
+      "name": "token-usage-missing",
+      "conversationId": "8ade14fc-c1cf-43d8-847b-7450b7e53220",
+      "runId": "8ef2f03a-0062-4527-9e79-d966c2546659",
+      "budget": {
+        "limits": {
+          "maxReportedTokens": 100
+        },
+        "requestCount": 1,
+        "reportedTokens": 0,
+        "elapsedMs": 209,
+        "reportedTokensKnown": false,
+        "failure": {
+          "code": "RP_TEAM_BUDGET_USAGE_UNAVAILABLE",
+          "message": "RP Team cannot enforce the reported-token budget because a provider request returned no actual usage",
+          "kind": "usage_unavailable",
+          "limit": 100,
+          "observed": 0
+        }
+      },
+      "outcome": "failed_without_publication"
+    },
+    {
+      "name": "token-threshold-exact",
+      "conversationId": "bedd3c8d-0da4-427f-9671-b2769ed5b7c2",
+      "runId": "5fa2df8a-12a9-4ff4-8373-be206bc428a3",
+      "budget": {
+        "limits": {
+          "maxReportedTokens": 5
+        },
+        "requestCount": 1,
+        "reportedTokens": 5,
+        "elapsedMs": 201,
+        "reportedTokensKnown": true,
+        "failure": {
+          "code": "RP_TEAM_BUDGET_EXCEEDED",
+          "message": "RP Team reported-token budget exceeded (5 tokens of 5)",
+          "kind": "maxReportedTokens",
+          "limit": 5,
+          "observed": 5
+        }
+      },
+      "outcome": "failed_without_publication"
+    },
+    {
+      "name": "trigger-dedupe",
+      "conversationId": "3d27cb3c-8d42-4cd9-a98e-c9b075a9ea13",
+      "runId": "6a837a03-8f4d-4870-8000-54dceb048731",
+      "activations": 1,
+      "triggers": [
+        "keyword",
+        "periodic"
+      ]
+    },
+    {
+      "name": "memory-commit",
+      "conversationId": "54a3a0a8-4c5c-4829-8ec5-5763c5ddc380",
+      "runId": "54ec521f-c36e-42e2-b927-68783114bc00",
+      "memoryCount": 1,
+      "state": "committed"
+    },
+    {
+      "name": "memory-rollback",
+      "conversationId": "9c4723ba-8ef0-4bad-9618-c11d499259ff",
+      "runId": "8305a387-3f82-4f26-a41c-d9d534ad9c39",
+      "memoryCount": 0,
+      "state": "rolled_back"
+    }
+  ],
+  "fixtureLogPath": "C:\\Users\\O4\\Desktop\\agent rp team\\output\\v041-events-native\\rp-team-v024-fixture-model.jsonl"
+}

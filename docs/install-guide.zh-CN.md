@@ -1,35 +1,53 @@
-# 安装与更新
+# RP Agent Team 0.7.2 安装与数据导入
 
-RP Agent Team 0.4.0 需要固定版本的 ElecKoi v0.2.4（提交 `088c2c25135fbcc1890df4d0941987d5e87e9f8f`）和 DSH 0.2.0-rc.2。仓库同时提供独立插件源码、宿主适配补丁和可直接导入的 DSH 插件归档。
+0.7.2 的适配目标是 ElecKoi v0.2.21 Windows x64 的源码提交 `924e30aa6d22b45cea67a4376843764e25b94657`，搭配 DSH 0.2.2-rc.1、Cordis 4.1.0、Electron 44.7.0。宿主补丁扩展正式聊天保存、状态回执、归档、轨迹和隔离试演，并沿用上游的变量身份迁移。插件配置沿用 schema 2。 [官方 Windows 构建源码](https://github.com/eleckoi/ElecKoi/commit/924e30aa6d22b45cea67a4376843764e25b94657)
 
-## 第一次安装
+## 构建和安装
 
-1. 关闭 ElecKoi，确保源码是上述 ElecKoi 提交，并完整备份 ElecKoi userData。
-2. 在 ElecKoi 源码根目录执行：
+工作区内用 `启动电子爱-v0.2.21.ps1` 打开新版的独立档案。原来的 `启动新版电子爱.ps1` 打开 v0.2.20 档案，该宿主使用 `eleckoi-v0.2.20-win-rp-team-v0.5.1.patch`，可安装同一份 0.7.2 插件。准备新检出时，先核对交付的 `SHA256SUMS.txt`，再在确切源码提交上检查并应用对应补丁。
 
-   ```sh
-   git rev-parse HEAD
-   git apply --check path/to/eleckoi-v0.2.4.patch
-   git apply path/to/eleckoi-v0.2.4.patch
-   pnpm install
-   pnpm build
-   ```
+```powershell
+git rev-parse HEAD
+git apply --check $patchPath
+git apply $patchPath
+pnpm install --frozen-lockfile
+pnpm prepare:desktop
+pnpm --filter eleckoi-desktop build
+pnpm check:electron-sqlite
+```
 
-   `git rev-parse HEAD` 必须输出上述固定提交。适配补丁包含产品 Host 对话、状态、DSH 工作区和轨迹接口的窄扩展；不能把它当作插件包内容直接导入。
+`$patchPath` 为 v0.2.21 交付中的 `eleckoi-v0.2.21-win-rp-team-v0.7.2.patch` 的绝对路径。宿主使用其锁定的 pnpm 10.32.1。启动构建后的 `apps/desktop` 时，为 Electron 传入独立的 `--user-data-dir`。在 DSH 插件管理器导入 `rp-team-dsh-roleplay-team-0.7.2.tgz`，按提示重启，然后打开角色聊天，点击输入区的「角色团队」。
 
-3. 启动 ElecKoi，打开 DSH 插件管理器，导入 [v0.4.0 Release](https://github.com/ynian2754-droid/rp-agent-team/releases/tag/v0.4.0) 的 `rp-team-dsh-roleplay-team-0.4.0.tgz`，然后启用 **角色团队**。
-4. 进入角色聊天，在输入框打开角色团队。旧的 schemaVersion 2 团队配置会保留原行为；新功能在你创建配置后才生效。
+自行生成插件包时，在插件仓库使用 Node.js 22+ 和 pnpm 11.22.0，执行 `pnpm install --frozen-lockfile`、`pnpm test` 和 `pnpm pack:dshbundle`。包写入 `DSHbundle/`。
 
-不使用 GitHub Release 时，也可以从源码仓库运行 `pnpm install --frozen-lockfile && pnpm pack:dshbundle`，再导入构建目录 `DSHbundle/` 中生成的 `.tgz`。
+## 从旧环境导入
 
-## 从 0.3.0 更新
+### 电子爱 v0.2.20 或官方 v0.2.21
 
-更新前关闭 ElecKoi 并完整备份 userData。以固定 v0.2.4 宿主代码为基础，应用本仓库的宿主补丁并重新构建，然后通过 DSH 插件管理器安装新的 `.tgz`。产品数据库保持版本 10，不要重跑旧聊天迁移。0.3.0 的 V2 配置与插件数据会继续使用。
+新版宿主将官方 schema 16、官方 schema 17 和本项目 v0.2.20 团队版 schema 17 升到 18。升级补齐变量来源，并保留旧团队版的提交回执和历史快照。新的会话归档使用 v3，仍可读 v1 和 v2。
 
-## 卸载和恢复
+要带上 v0.2.20 的聊天，先关闭两个版本，再将原档案复制到一个空目录。复制时跳过 DSH 的依赖缓存，保留插件数据、依赖清单和锁文件。下面从工作区根目录执行。
 
-先在 DSH 插件管理器停用或卸载插件，再从 ElecKoi 源码目录回退补丁（仅适用于当前工作树中确实单独应用的补丁，且先确认没有其他工作依赖这些修改）。插件自己的场景和运行记录保存在 DSH 插件数据目录；按 Electron/DSH 的标准备份流程保存后再清理。
+```powershell
+$oldProfile = Join-Path (Get-Location) 'output\profiles\eleckoi-v0.2.20'
+$newProfile = Join-Path (Get-Location) 'output\profiles\eleckoi-v0.2.21-migrated'
+if (Test-Path -LiteralPath $newProfile) { throw 'Choose an unused profile directory.' }
+$dependencyCache = Join-Path $oldProfile 'dsh-runtime\home\profiles\desktop\node_modules'
+robocopy $oldProfile $newProfile /E /XJ /XD $dependencyCache
+if ($LASTEXITCODE -ge 8) { throw 'Profile copy failed.' }
+.\启动电子爱-v0.2.21.ps1 -UserDataDirectory $newProfile
+```
 
-如果升级后需要整体恢复，关闭 ElecKoi 并还原升级前的**完整** userData，再切回匹配的 ElecKoi 源码版本。只恢复 SQLite 文件不足以恢复原生 Session、附件和插件状态。
+首次启动会迁移数据库。在副本的 DSH 插件管理器导入 0.7.2，恢复插件依赖并按提示重启。验证聊天、队伍配置和变量历史后，从副本继续使用。直接运行启动脚本会进入预装插件的新档案。
 
-遇到问题，请在 GitHub Issues 中提供 ElecKoi 提交、插件版本和不含凭据/聊天内容的错误摘要。不要上传 userData、原始轨迹、Token、API Key 或完整数据库。
+### 更早的团队版
+
+旧团队版的 schema 10 与同号官方库结构不同。先停机备份，再用匹配的旧宿主导出归档，导入新版独立档案。保留旧角色、媒体、预设、Session 和插件资料，以便核对和恢复。
+
+- 旧 v0.4.1 停机副本的三个导出工具随 [0.5.0 历史交付说明](adaptation-0.5.0/install-guide.zh-CN.md) 使用，生成一份独立转换目录。已有转换目录时复制归档、产品和附件材料到新目录，以新导入记录绑定新资料目录。
+- 在新宿主的源码根目录执行 `node scripts/import-v050-stopped-copy.mjs`。按 CLI 用法填写 `--conversion-dir` 和五个新目标路径，并将 `--preset-template` 指向 `apps/desktop/resources/dsh/agent-preset-template/agent.cordis.yml`，`--agent-patch` 指向同目录下的 `desktop-agent.patch.yml`。用匹配本地 SQLite 模块 ABI 的 Node 或 Electron Node 模式执行。
+- 导入返回 `official-import-mapping.json`，包含聊天、Session、消息、状态操作和附件的身份映射。然后在插件仓库用 `node scripts/remap-plugin-data-v050.mjs --source <旧插件数据副本> --destination <空的新插件数据目录> --mapping <映射文件>` 重映射团队数据。
+- 通过 `exportArchive` 生成的 0.5.0 原生归档也可由新 Host 的 `importArchiveWithMapping` 读取。导入前准备对应角色与资源。旧便携归档没有编码当前会话专属设定覆盖，含这类数据时应保留原停机副本。已归档的旧试演通过重新冻结继续使用。
+- 在新资料目录内核对聊天历史、附件、队伍配置与轨迹。续聊、重生成和回退都从新环境执行。卸载使用电子爱的官方插件管理器。恢复旧环境时一同恢复匹配的宿主和数据副本。
+
+实际范围和运行结果见随包的验收记录。

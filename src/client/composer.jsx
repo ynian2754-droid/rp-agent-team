@@ -2,7 +2,7 @@ import { React } from './react.js'
 import { t } from './i18n.js'
 import { services, openWorkspace, useConversation, useProductConversation } from './client-state.js'
 import { manualMembers } from './editor-model.js'
-import { composerStatus, findMessageRun, isActivePhase, runMembers } from './run-model.js'
+import { activeMember, composerStatus, findMessageRun, isActivePhase, participants } from './run-model.js'
 import { Check, Icon } from './fields.jsx'
 
 /** Composer entry: one quiet button, plus the next-turn picker when manual members exist. */
@@ -22,12 +22,15 @@ export function TeamToggle({ sessionId, useSessionStatus }) {
   const failed = snapshot.configState === 'error'
   const state = failed ? t('configUnavailable') : snapshot.enabled ? t('enabled') : t('disabled')
   const manual = snapshot.enabled ? manualMembers(snapshot.config) : []
+  const ready = snapshot.configState === 'ready'
+  const title = failed ? snapshot.error : snapshot.config ? `${snapshot.config.name} · ${state}` : `${t('openTeam')}（${state}）`
   return <div className="rp-team-control">
     <button type="button" className={`rp-team-toggle ${snapshot.enabled ? 'is-enabled' : ''} ${failed ? 'is-error' : ''}`}
-      aria-label={`${t('openTeam')}（${state}）`} title={failed ? snapshot.error : `${t('openTeam')}（${state}）`}
+      aria-label={`${t('openTeam')}（${state}）`} title={title}
       onClick={() => openWorkspace(sessionId, conversationId)}>
       <span className="rp-team-toggle-icon"><Icon name="team" /><span className="rp-team-dot" /></span>
       <span>{t('team')}</span>
+      {failed ? <span className="rp-team-toggle-state">{t('shell.unavailable')}</span> : ready && !snapshot.enabled ? <span className="rp-team-toggle-state">{t('shell.off')}</span> : null}
     </button>
     {manual.length > 0 ? <ManualPicker conversationId={conversationId} members={manual} selectedIds={snapshot.status?.manualAgentIds || []} /> : null}
   </div>
@@ -107,17 +110,19 @@ export function TeamStatusLine({ sessionId }) {
     </div>
   }
   const budgetFailure = snapshot.status?.run?.budget?.failure
+  const working = status.phase === 'working' ? activeMember(snapshot.status.run) : null
   const phase = status.phase === 'failed' && budgetFailure
     ? t(budgetFailure.kind === 'usage_unavailable' ? 'budget.usageUnavailable' : 'budget.exhausted')
-    : t(`status.${status.phase}`)
+    : working ? t('shell.memberWorking', { name: working.name || working.id }) : t(`status.${status.phase}`)
   return <div className={`rp-team-status tone-${status.tone}`} aria-live="polite">
     <button type="button" className="rp-team-status-button" aria-label={`${t('viewRun')}：${phase}`}
-      onClick={() => openWorkspace(sessionId, conversationId, 'run', status.runId)}>
+      onClick={() => openWorkspace(sessionId, conversationId, 'run')}>
       <span className="rp-team-status-dot" aria-hidden="true" />
       <span className="rp-team-status-text">{t('team')}<span className="rp-team-sep" aria-hidden="true">·</span>{phase}
         {status.progress ? <span className="rp-team-status-progress" aria-hidden="true">{status.progress.done}/{status.progress.total}</span> : null}
       </span>
       {status.tone === 'failed' ? <span className="rp-team-status-link">{t('viewReason')}</span> : null}
+      {status.tone === 'done' || status.tone === 'cancelled' ? <span className="rp-team-status-link is-quiet">{t('shell.viewRound')}</span> : null}
     </button>
   </div>
 }
@@ -134,11 +139,11 @@ export function MessageTraceLink({ sessionId, conversationId, productMessageId, 
   }, [relevant, conversationId, snapshot.statusState, snapshot.tracesState])
   const run = relevant ? findMessageRun([snapshot.status?.run, ...snapshot.traces], productMessageId, messageId) : null
   if (!run) return null
-  const count = runMembers(run).length
+  const count = participants(run).length
   return <button type="button" className="rp-team-message-result" onClick={() => openWorkspace(sessionId, conversationId, 'run', run.runId)}>
     <Icon name="trace" />
     <span>{t('viewCollaboration')}</span>
+    {count > 0 ? <span className="rp-team-result-meta">{t('shell.took', { n: count })}</span> : null}
     {run.phase === 'awaiting_commit' ? <span className="rp-team-result-meta">{t('status.awaiting_commit')}</span> : null}
-    {count > 0 ? <span className="rp-team-result-meta">{t('memberCount', { n: count })}</span> : null}
   </button>
 }

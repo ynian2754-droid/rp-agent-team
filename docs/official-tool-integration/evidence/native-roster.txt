@@ -1,0 +1,103 @@
+Browser tab: 1, Title: "DeepSeek Harness", URL: "http://127.0.0.1:58473/".
+1 AXWebArea DeepSeek Harness, URL: 127.0.0.1:58473/
+	2 container
+		3 container
+			4 button 新建会话
+			5 button 收起侧边栏
+			6 button 新建会话
+			7 container 全局面板
+				8 button 插件
+			9 text 工作区
+			10 container
+				11 button (collapsed) Description: 搜索会话, Secondary Actions: Expand
+				12 text field (settable)
+			13 button 视图选项
+			14 button 添加工作区
+			15 outline 会话
+				16 container
+					17 row (expanded) 未分组, Secondary Actions: Collapse
+						18 text 未分组
+					19 row (selectable) PROBE_CANCEL 5分钟
+						20 text PROBE_CANCEL
+						21 text 5分钟
+					22 row (selectable) PROBE_FAIL 5分钟
+						23 text PROBE_FAIL
+						24 text 5分钟
+					25 row (selectable) 未命名 5分钟
+						26 text 未命名
+						27 text 5分钟
+					28 row (selectable) PROBE_WRITE_DURING 5分钟
+						29 text PROBE_WRITE_DURING
+						30 text 5分钟
+					31 row (selectable) PROBE_NESTED 5分钟
+						32 text PROBE_NESTED
+						33 text 5分钟
+					34 row (selected) 未命名 5分钟
+						35 text 未命名
+						36 text 5分钟
+					37 button (expanded) 收起, Secondary Actions: Collapse
+			38 pop up button (collapsed) Description: 设置, Secondary Actions: Expand
+			39 container
+				40 container 会话层级
+					41 text workspace
+				42 pop up button (collapsed) Description: 2 个子智能体, Secondary Actions: Expand
+				43 pop up button (expanded) Description: 智能体团队, Secondary Actions: Collapse
+				44 text 默认 Agent 预设
+				45 button 用 文件资源管理器 打开
+				46 pop up button (collapsed) Description: 更多打开方式, Secondary Actions: Expand
+				47 pop up button (collapsed) Description: 更多操作, Secondary Actions: Expand
+				48 button 打开右侧边栏
+				49 tab group
+					50 tab (selected, settable, boolean) 对话, Value: 1
+					51 tab (selectable, settable, boolean) 轨迹, Value: 0
+			52 container
+				53 container 轮次导航
+					54 container
+						55 button 跳转到第 1 轮
+						56 button 跳转到第 2 轮
+				57 container
+					58 text PROBE_SUCCESS 03:45
+					59 button 复制
+					60 text 已完成
+					61 button (disabled) 已完成，用时 1秒
+						62 text 已完成，用时  1 秒
+					63 text 已完成
+					64 button (collapsed) 已完成，用时 1秒, Secondary Actions: Expand
+						65 text 已完成，用时 
+						66 text 1
+						67 text 秒
+					68 text <FINAL> OFFICIAL_TOOL_TEAM_BODY </FINAL>
+					69 button 复制
+					70 checkbox Description: 好的回答, Value: 0
+					71 checkbox Description: 有问题的回答, Value: 0
+					72 button 在新对话中分支
+					73 text 03:45
+				74 text entry area (settable) 发消息或创建任务, / 调用指令, @ 文件或对话
+				75 pop up button (collapsed) Description: 添加文件或调用指令, Secondary Actions: Expand
+				76 button 访问模式，当前：Eleckoi Workspace
+				77 pop up button (collapsed) Description: 选择模型，当前 root, Secondary Actions: Expand
+				78 button (disabled) 发送消息
+				79 pop up button (collapsed) Description: 2 轮 3 步, Secondary Actions: Expand
+		80 container 智能体团队
+			81 container
+				82 heading 成员 3, Value: 3
+					83 text 成员
+				84 button (disabled) lead 当前会话 未运行
+					85 text lead 当前会话
+					86 text 未运行
+				87 button observer-de4b9945 未运行
+					88 text observer-de4b9945
+					89 text 未运行
+				90 button actor-de4b9945 未运行
+					91 text actor-de4b9945
+					92 text 未运行
+			93 container
+				94 heading 共享任务 1, Value: 3
+					95 text 共享任务 1
+				96 text Team tool de4b9945-2ecc-49bd-b6b7-ceef877738a9
+				97 text 已完成
+				98 text Two-member scoped product reading and result assembly
+				99 container
+					100 text task-1 Owner :  lead
+
+The focused UI element is 80 container 智能体团队

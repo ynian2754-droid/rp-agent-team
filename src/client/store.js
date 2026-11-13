@@ -1,4 +1,5 @@
 import { ACTIVE_PHASES } from './run-model.js'
+import { t } from './i18n.js'
 
 const POLL_INTERVAL = 1500
 
@@ -48,7 +49,8 @@ export function createConversationStore(api, conversations) {
   }
   const dedupe = (loads, key, start) => {
     if (loads.has(key)) return loads.get(key)
-    const promise = start().finally(() => loads.delete(key))
+    // A forced reload replaces the entry; the older load finishing later must not remove the newer one.
+    const promise = start().finally(() => { if (loads.get(key) === promise) loads.delete(key) })
     loads.set(key, promise)
     return promise
   }
@@ -58,6 +60,9 @@ export function createConversationStore(api, conversations) {
     if (force) configLoads.delete(conversationId)
     if (snapshotFor(conversationId).configState === 'idle') publish(conversationId, { configState: 'loading' })
     return dedupe(configLoads, conversationId, () => api.getConfig(conversationId).then(value => {
+      // Revisions only grow: a slower answer from before a save or forced reload must not bring back older settings.
+      const shown = snapshotFor(conversationId)
+      if (shown.configState === 'ready' && Number.isSafeInteger(shown.revision) && value.revision < shown.revision) return value
       publish(conversationId, { configState: 'ready', enabled: Boolean(value.enabled), revision: value.revision, config: value.config, parameterValues: value.parameterValues || {}, error: '' })
       return value
     }, error => {
@@ -157,7 +162,7 @@ export function createConversationStore(api, conversations) {
     const intent = await api.retry(conversationId, runId, memberIds, requestId)
     try {
       if (intent?.accepted !== true || intent.requestId !== requestId || !Number.isSafeInteger(intent.targetEventSeq)) {
-        throw new Error('The host did not accept the member retry request.')
+        throw Object.assign(new Error(t('run.retryNotAccepted')), { code: 'RP_TEAM_RETRY_NOT_ACCEPTED' })
       }
       return await conversations.regenerate({
         conversationId,

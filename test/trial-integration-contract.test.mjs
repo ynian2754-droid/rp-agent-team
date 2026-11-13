@@ -5,22 +5,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createTrialApi } from '../src/host/trials.mjs'
 import { defaultTeamConfig } from '../src/shared/schema.mjs'
+import { writeDurableTrialCheckpoint } from '../src/host/trial-storage.mjs'
+import { createTrialPublicHost } from './fixtures/trial-public-host.mjs'
 
 test('trial API freezes resolved routes, deduplicates starts, and resumes each variant from its own checkpoint', async () => {
   const home = mkdtempSync(join(tmpdir(), 'rp-team-trial-contract-'))
-  const workers = [], captured = []
+  const workers = []
   const config = defaultTeamConfig()
   config.authorParameters = [{id:'route',name:'Model',type:'model',default:'inherit',bindings:[{mode:'set',target:{kind:'agent',agentId:config.agents[0].id,path:'/modelRef'}}]}]
-  const snapshot = {format:'eleckoi.rp-team-trial-snapshot',version:1,conversationId:'source',createdAt:'2026-10-04T00:00:00Z',archive:{},character:{},teamState:{revision:0,namespaces:{},pathVersions:{}}}
+  const teamState = { revision: 0, namespaces: {}, pathVersions: {} }
+  const { ctx } = createTrialPublicHost()
   const api = createTrialApi({
-    ctx:{eleckoiTrialSnapshots:{
-      freeze:async()=>({privateSnapshot:snapshot,createdAt:snapshot.createdAt,summary:{}}),getHostRoot:()=>home,
-      captureModelProviders:async({providerIds})=>{captured.push(providerIds);return providerIds.map(provider=>({provider,settingsValue:{}}))},
-      captureAgentPresets:async()=>[],
-    }},
+    ctx,
     store:{path:join(home,'config.json'),get:()=>({config,enabled:true})},
-    stateStore:{committedSnapshot:()=>snapshot.teamState},
-    getOptions:async input=>{assert.deepEqual(input,{conversationId:'source'});return{}},
+    stateStore:{committedSnapshot:()=>teamState},
     workerFactory:plan=>{
       let finish
       const done=new Promise(resolve=>{finish=resolve})
@@ -34,12 +32,14 @@ test('trial API freezes resolved routes, deduplicates starts, and resumes each v
     const frozen=await api.freezeTrialSnapshot({conversationId:'source'})
     const input={conversationId:'owner-chat',operationId:'start-1',scenario:{name:'Two variants',snapshotId:frozen.snapshotId,steps:[{inputText:'one'},{inputText:'two'}]},variants:['A','B'].map(id=>({id,config,parameterValues:{route:{provider:'local-route',model:'local-model'}}}))}
     const first=await api.startTrial(input);await flush(1)
-    assert.deepEqual(captured[0],['local-route'])
+    assert.ok(workers[0].plan.snapshot.modelProviders.some(route=>route.provider==='local-route'))
     assert.equal((await api.getTrial({trialId:first.trialId})).trial.sourceConversationId,'source')
     assert.equal((await api.startTrial(input)).trialId,first.trialId)
     assert.equal(workers.length,1)
-    const checkpoint={...snapshot,createdAt:'2026-10-04T00:00:01Z',teamState:{revision:1,namespaces:{shared:{count:1}},pathVersions:{}}}
-    workers[0].plan.onProgress({type:'turn:completed',variantId:'A',turn:{turn:1,runId:'run-A-1',body:'one',state:{},usage:{requests:1,reportedTokens:2},nativeEvents:[],sessionId:'session-A',trajectory:{executions:[]}},checkpoint})
+    const checkpoint={...workers[0].plan.snapshot,createdAt:'2026-10-04T00:00:01Z',teamState:{revision:1,namespaces:{shared:{count:1}},pathVersions:{}}}
+    const turn={turn:1,runId:'run-A-1',attemptId:'attempt-A-1',body:'one',state:{},usage:{requests:1,reportedTokens:2},taskUsage:{requests:1,reportedTokens:2,elapsedMs:1},nativeEvents:[],sessionId:'session-A',conversationId:'worker-conversation-A',trajectory:{executions:[]},commitReceipt:{outcome:'committed',conversationId:'worker-conversation-A',runId:'run-A-1',sessionId:'session-A',turn:1,active:true}}
+    writeDurableTrialCheckpoint(workers[0].plan.workerCheckpointRoot, first.trialId, 'A', {format:'rp-team.trial-worker-checkpoint',version:1,trialId:first.trialId,variantId:'A',receipt:turn.commitReceipt,turn,checkpoint})
+    workers[0].plan.onProgress({type:'turn:completed',variantId:'A',turn:{turn:1,runId:'run-A-1',attemptId:'attempt-A-1'}})
     fail(workers[0]);await new Promise(resolve=>setImmediate(resolve))
     await api.retryTrial({trialId:first.trialId,operationId:'retry-1'});await flush(2)
     assert.equal(workers[1].plan.variants[0].turns.length,1)

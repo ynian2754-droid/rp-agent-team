@@ -1,6 +1,6 @@
 {
   "name": "@rp-team/dsh-roleplay-team",
-  "version": "0.4.0",
+  "version": "0.7.2",
   "packageManager": "pnpm@11.22.0",
   "description": "Configurable agent teams for ElecKoi roleplay",
   "license": "AGPL-3.0-or-later",
@@ -52,6 +52,8 @@
     "预设作者指南.md",
     "docs/authoring-0.4.0.md",
     "docs/implementation-0.4.0.md",
+    "docs/tool-decoupling-0.4.1",
+    "docs/adaptation-0.5.0",
     "docs/user-manual.zh-CN.md",
     "docs/install-guide.zh-CN.md"
   ],
@@ -64,22 +66,22 @@
     "pack:dshbundle": "node scripts/build.mjs && node scripts/pack.mjs"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-typert-generator": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-typert-generator": "0.2.2-rc.1",
     "esbuild": "0.25.12",
     "typescript": "6.0.3",
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-experimental-agent-team": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-scope": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2",
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-experimental-agent-team": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-scope": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.1",
     "yaml": "2.9.0"
   },
   "engines": {
-    "dsh": "0.2.0-rc.2"
+    "dsh": "0.2.2-rc.1"
   },
   "dsh": {
     "bundle": {
@@ -90,12 +92,28 @@
       "inject": [
         "@deepseek-ai/dsh-api-gateway",
         "@deepseek-ai/dsh-client-ui-sidebar-right",
-        "@eleckoi/dsh-client-conversations"
+        "@eleckoi/dsh-client-conversations",
+        "@eleckoi/dsh-client-roleplay",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-api-session-controller"
       ]
     }
   },
   "eleckoi": {
     "developerInterfaces": [
+      {
+        "id": "attachments",
+        "kind": "service",
+        "title": "DSH file attachments",
+        "description": "Read an authorized current-input file through the official attachment store.",
+        "mode": "call",
+        "scope": "host",
+        "relation": "consumes",
+        "owner": "@deepseek-ai/dsh-attachment",
+        "members": [
+          "readFileStream"
+        ]
+      },
       {
         "id": "rpAgentTeam",
         "kind": "service",
@@ -231,46 +249,86 @@
         ]
       },
       {
-        "id": "eleckoiTrajectory",
+        "id": "eleckoiConversationsApi",
         "kind": "service",
-        "title": "团队主轨迹来源",
-        "description": "以持久运行关联提供成员原生会话及结构化观测事件。",
-        "mode": "register",
-        "scope": "client",
-        "relation": "contributes",
-        "owner": "@eleckoi/dsh-client-conversations",
-        "members": [
-          "registerSource"
-        ]
-      },
-      {
-        "id": "eleckoiTrialSnapshots",
-        "kind": "service",
-        "title": "试演资料快照",
-        "description": "冻结并在独立空间导入所选聊天资料。",
+        "title": "Official product conversation API",
+        "description": "Read prepared turn identity and product data; stage state for normal turn commit and query durable outcomes.",
         "mode": "call",
         "scope": "host",
         "relation": "consumes",
-        "owner": "@eleckoi/dsh-client-roleplay",
+        "owner": "@eleckoi/dsh-product-api",
         "members": [
-          "freeze",
-          "seed",
-          "getHostRoot",
-          "captureModelProviders",
-          "captureAgentPresets"
+          "list",
+          "preparePrompt",
+          "preparedTurn",
+          "currentTurn",
+          "stageTurnState",
+          "turnCommitStatus",
+          "authorState",
+          "details",
+          "editCurrentState",
+          "stateEditStatus",
+          "listStateEdits",
+          "exportArchive",
+          "importArchiveWithMapping"
         ]
       },
       {
-        "id": "eleckoiTrajectory",
+        "id": "eleckoiCharactersApi",
         "kind": "service",
-        "title": "试演原生轨迹",
-        "description": "在试演页面复用正式轨迹组件。",
+        "title": "eleckoiCharactersApi",
+        "description": "Public product data used by runtime admission or isolated trial freeze/import.",
         "mode": "call",
-        "scope": "client",
+        "scope": "host",
         "relation": "consumes",
-        "owner": "@eleckoi/dsh-client-conversations",
+        "owner": "@eleckoi/dsh-product-api",
         "members": [
-          "renderSnapshot"
+          "export",
+          "prepareImport",
+          "commitImport"
+        ]
+      },
+      {
+        "id": "eleckoiConversationModelsApi",
+        "kind": "service",
+        "title": "eleckoiConversationModelsApi",
+        "description": "Public product data used by runtime admission or isolated trial freeze/import.",
+        "mode": "call",
+        "scope": "host",
+        "relation": "consumes",
+        "owner": "@eleckoi/dsh-product-api",
+        "members": [
+          "current",
+          "select"
+        ]
+      },
+      {
+        "id": "eleckoiAgentPresetsApi",
+        "kind": "service",
+        "title": "eleckoiAgentPresetsApi",
+        "description": "Public product data used by runtime admission or isolated trial freeze/import.",
+        "mode": "call",
+        "scope": "host",
+        "relation": "consumes",
+        "owner": "@eleckoi/dsh-product-api",
+        "members": [
+          "read",
+          "export",
+          "prepareImport",
+          "commitImport"
+        ]
+      },
+      {
+        "id": "eleckoiCharacterConfigurationApi",
+        "kind": "service",
+        "title": "eleckoiCharacterConfigurationApi",
+        "description": "Public product data used by runtime admission or isolated trial freeze/import.",
+        "mode": "call",
+        "scope": "host",
+        "relation": "consumes",
+        "owner": "@eleckoi/dsh-product-api",
+        "members": [
+          "saveSettingLibrary"
         ]
       }
     ]

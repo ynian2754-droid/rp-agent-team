@@ -29,11 +29,10 @@ test('author preview hashes complete source snapshots and never inspects executa
   let history = [{ role: 'user', content: 'First turn' }]
   let authorBusy = false
   let stateRevision = 0
-  const ctx = { eleckoiStoryState: { authorSnapshot: async () => ({
-    context: { currentUserInput: 'Continue', history, characterName: 'Aster', persona: { name: 'Aster' } },
-    world: { variables: { scene: { place: 'garden' } } },
-    baseHash: 'same-world-hash', anchor: { sessionId: 'session-1', turn: 1 }, busy: false
-  }) } }
+  const ctx = authorContext(() => [...history, { role: 'user', content: 'Continue' }], {
+    metadata: { characterName: 'Aster', characterPersona: { name: 'Aster' } },
+    variables: { scene: { place: 'garden' } }
+  })
   const api = createAuthorToolsApi({
     ctx,
     store: { path: join(tmpdir(), 'never-opened-store.json') },
@@ -63,6 +62,46 @@ test('author preview hashes complete source snapshots and never inspects executa
   assert.equal(changedStateCatalog.version, changedStatePreview.sourceVersion)
 })
 
+test('a preview whose committed state belongs to another anchor still matches the catalog version', async () => {
+  const ctx = authorContext(() => [{ role: 'user', content: 'First turn' }, { role: 'assistant', content: 'Reply' }, { role: 'user', content: 'Continue' }])
+  const api = createAuthorToolsApi({
+    ctx,
+    store: { path: join(tmpdir(), 'never-opened-store.json') },
+    getOptions() { throw new Error('preview must not inspect executable option scopes') },
+    readState: async () => ({ values: [], busy: false, revision: 3, worldHash: 'w', anchor: { sessionId: 'elsewhere', seq: 999 } })
+  })
+  const config = defaultTeamConfig()
+  const catalog = await api.getContextCatalog({ conversationId: 'conversation-1' })
+  const preview = await api.previewConfig({ conversationId: 'conversation-1', config })
+  assert.ok(preview.anchor, 'the fixture session has an anchor to compare against')
+  assert.ok(preview.issues.some(issue => issue.code === 'initial-state-stale'))
+  assert.equal(preview.sourceVersion, catalog.version, 'an unusable state snapshot must not make a fresh preview look stale')
+})
+
+test('author snapshots keep human user turns and exclude runtime or settled-child user notices', async () => {
+  const ctx = authorContext(() => [
+    { role: 'user', content: 'Earlier human turn.' },
+    { role: 'user', source: { kind: 'runtime-context' }, content: 'Injected context is not a turn.' },
+    { role: 'user', source: { kind: 'subagent-settled', senderSessionId: 'child-1' }, content: 'Child finished.' },
+    { role: 'assistant', content: 'Earlier reply.' },
+    { role: 'user', content: 'Current human turn.' }
+  ])
+  const api = createAuthorToolsApi({
+    ctx, store: { path: join(tmpdir(), 'unused-history-state.json') },
+    readState: async () => ({ definitions: [], values: [] })
+  })
+  const config = defaultTeamConfig()
+  config.agents[0].context.sources = [{ type: 'current_input' }, { type: 'full_history' }]
+  config.agents[0].triggers = [{ type: 'periodic', every: 3, offset: 0 }]
+  const preview = await api.previewConfig({ conversationId: 'conversation-1', config })
+  assert.equal(preview.members[0].context.current_input.text, 'Current human turn.')
+  assert.deepEqual(preview.members[0].context.full_history.map(item => item.content), [
+    'Earlier human turn.', 'Earlier reply.'
+  ])
+  assert.equal(preview.members[0].triggered, true,
+    'the next ordinal is based on two human turns, not injected or settled user-role messages')
+})
+
 test('preview applies draft defaults without persistence and uses runtime nested ACL redaction', async () => {
   const config = defaultTeamConfig()
   config.state.definitions = [{
@@ -78,10 +117,7 @@ test('preview applies draft defaults without persistence and uses runtime nested
   agent.triggers = [{ type: 'condition', condition: {
     op: 'compare', namespace: 'world', path: '/profile/public', operator: 'eq', value: 'draft default'
   } }]
-  const ctx = { eleckoiStoryState: { authorSnapshot: async () => ({
-    context: { currentUserInput: 'Hello', history: [] }, world: {},
-    baseHash: 'unchanged', anchor: { sessionId: 'session-1', turn: 0 }, busy: false
-  }) } }
+  const ctx = authorContext(() => [{ role: 'user', content: 'Hello' }])
   const api = createAuthorToolsApi({
     ctx, store: { path: join(tmpdir(), 'unused-state.json') },
     readState: async () => ({
@@ -102,9 +138,7 @@ test('preview reports messages and drafts as dynamic instead of fabricating futu
     { type: 'agent_messages', selector: '/summary' },
     { type: 'drafts', selector: '/text' }
   ]
-  const ctx = { eleckoiStoryState: { authorSnapshot: async () => ({
-    context: { currentUserInput: 'Hello', history: [] }, world: {}, baseHash: 'hash', anchor: null, busy: false
-  }) } }
+  const ctx = authorContext(() => [{ role: 'user', content: 'Hello' }])
   const api = createAuthorToolsApi({ ctx, store: { path: join(tmpdir(), 'unused-state.json') }, readState: async () => ({ definitions: [], values: [] }) })
   const preview = await api.previewConfig({ conversationId: 'conversation-1', config })
   const member = preview.members[0]
@@ -223,15 +257,39 @@ test('component export and import remap handoff targets through explicit agent p
   assert.equal(prepared.config.agents.at(-1).communication.handoffs[0].to, 'agent-2')
 })
 
+test('preview reports one check per trigger so the next turn can be explained member by member', async () => {
+  const config = defaultTeamConfig()
+  const [first, second] = config.agents
+  first.triggers = [{ type: 'periodic', every: 2, offset: 0 }]
+  second.triggers = [{ type: 'manual' }, { type: 'requested_by_agent', from: [first.id] }]
+  let messages = [{ role: 'user', content: 'Hello' }]
+  const api = createAuthorToolsApi({ ctx: authorContext(() => messages), store: { path: join(tmpdir(), 'unused-state.json') }, readState: async () => ({ definitions: [], values: [] }) })
+
+  const secondTurn = await api.previewConfig({ conversationId: 'conversation-1', config })
+  assert.equal(secondTurn.nextUserTurn, 2, 'one user message exists, so the next one is turn 2')
+  assert.deepEqual(secondTurn.members[0].triggerChecks, [{ type: 'periodic', outcome: 'run', every: 2, offset: 0, ordinal: 2 }])
+  assert.equal(secondTurn.members[0].triggered, true)
+  assert.deepEqual(secondTurn.members[1].triggerChecks, [
+    { type: 'manual', outcome: 'skip' },
+    { type: 'requested_by_agent', outcome: 'on_request', from: [first.id] }
+  ])
+  assert.equal(secondTurn.members[1].triggered, false, 'a request can only happen during a run')
+
+  messages = [...messages, { role: 'assistant', content: 'A reply' }, { role: 'user', content: 'Again' }]
+  const thirdTurn = await api.previewConfig({ conversationId: 'conversation-1', config, manualAgentIds: [second.id] })
+  assert.equal(thirdTurn.nextUserTurn, 3)
+  assert.deepEqual(thirdTurn.members[0].triggerChecks, [{ type: 'periodic', outcome: 'skip', every: 2, offset: 0, ordinal: 3 }])
+  assert.equal(thirdTurn.members[0].triggered, false)
+  assert.equal(thirdTurn.members[1].triggerChecks[0].outcome, 'run')
+})
+
 test('preview flags schema-constrained handoffs whose target cannot submit typed results', async () => {
   const config = defaultTeamConfig()
   config.agents[0].communication.handoffs = [{
     id: 'research', to: config.agents[1].id, mode: 'await', responseSchema: { type: 'object' }
   }]
   config.agents[1].outputAuthority.internal = false
-  const ctx = { eleckoiStoryState: { authorSnapshot: async () => ({
-    context: { currentUserInput: 'Hello', history: [] }, world: {}, baseHash: 'hash', anchor: null, busy: false
-  }) } }
+  const ctx = authorContext(() => [{ role: 'user', content: 'Hello' }])
   const api = createAuthorToolsApi({ ctx, store: { path: join(tmpdir(), 'unused-state.json') }, readState: async () => ({ definitions: [], values: [] }) })
   const preview = await api.previewConfig({ conversationId: 'conversation-1', config })
   const issue = preview.members[1].issues.find(item => item.code === 'typed-handoff-result-unavailable')
@@ -275,4 +333,57 @@ test('handoff guidance states exact typed request and automatic terminal-result 
   }, 1, new Map())
   assert.match(recipientText, /cannot succeed/)
   assert.match(recipientText, /requires typed \{summary,data\}/)
+})
+
+function authorContext(getMessages, { metadata = {}, variables = {} } = {}) {
+  const sessionId = 'session-1'
+  return {
+    eleckoiConversationsApi: {
+      async details() { return { runtimeSessionId: sessionId, metadata: { characterId: 'character-1', ...metadata } } },
+      async authorState() {
+        return { currentVariableStateJson: JSON.stringify(variables), settingLibrary: { groups: [], entries: [] } }
+      }
+    },
+    sessionQuery: {
+      async observeSession() {
+        const messages = getMessages()
+        const events = messages.map((message, index) => {
+          const row = {
+            id: `message-${index + 1}`, role: message.role, content: message.content,
+            ...(message.source ? { source: structuredClone(message.source) } : {})
+          }
+          if (row.role === 'user' && !row.source) row.source = { kind: 'user', rpcId: `rpc-${index + 1}` }
+          return {
+            type: `${message.role}/message`, seq: index + 1,
+            data: message.role === 'user' ? row : { message: row }
+          }
+        })
+        events.push({ type: 'turn/end', seq: events.length + 1, data: { turn: events.length } })
+        return { events, [Symbol.dispose]() {} }
+      }
+    }
+  }
+}
+
+test('the next-round forecast honours committed trigger cooldowns', async () => {
+  const { triggerIdentity } = await import('../src/host/event-triggers.mjs')
+  // Two human turns so far, so the forecast is for user turn 3.
+  const ctx = authorContext(() => [
+    { role: 'user', content: 'First.' }, { role: 'assistant', content: 'Reply.' }, { role: 'user', content: 'Second.' }
+  ])
+  const config = defaultTeamConfig()
+  const trigger = { type: 'always', cooldownTurns: 2 }
+  config.agents[0].triggers = [trigger]
+  const marker = ordinal => [{ triggerId: triggerIdentity(config.id, config.agents[0].id, trigger, 0), userTurnOrdinal: ordinal }]
+  for (const [startedOn, cooling] of [[2, true], [1, true], [0, false]]) {
+    const api = createAuthorToolsApi({
+      ctx, store: { path: join(tmpdir(), 'unused-cooldown-state.json') },
+      readState: async () => ({ definitions: [], values: [] }),
+      readCooldownMarkers: () => marker(startedOn)
+    })
+    const preview = await api.previewConfig({ conversationId: 'conversation-1', config })
+    const member = preview.members[0]
+    assert.equal(member.triggered, !cooling, `started on turn ${startedOn}`)
+    if (cooling) assert.deepEqual(member.triggerChecks, [{ type: 'always', outcome: 'cooldown', availableAt: startedOn + 3 }])
+  }
 })

@@ -1,11 +1,8 @@
 # Compatibility
 
-| Component | Supported version |
-| --- | --- |
-| ElecKoi | v0.2.4, commit `088c2c25135fbcc1890df4d0941987d5e87e9f8f` |
-| DeepSeek Harness | `0.2.0-rc.2` |
-| Plugin | 0.4.0 |
-| Team configuration | schema 2 |
-| ElecKoi product database | schema 10 |
+| ElecKoi Windows | PC source commit | Patched product database |
+| --- | --- | --- |
+| v0.2.21 | `924e30aa6d22b45cea67a4376843764e25b94657` | schema 18 |
+| v0.2.20 | `7e1ee209c2b4cc0d14373a25c81fa024d0328597` | team schema 17 |
 
-This release depends on Host interfaces added by [`host-patch/`](host-patch/README.md). A later ElecKoi commit may change DSH lifecycle, state commit, or trajectory contracts. Do not assume compatibility from a matching application version label; check the commit and verify the patch applies.
+RP Agent Team 0.7.2 uses team configuration schema 2, DSH 0.2.2-rc.1 and Cordis 4.1.0. Each host requires its matching [supplement](host-patch/README.md). The v0.2.21 host accepts official schema 16 or 17 and the v0.2.20 team schema 17. See the [installation guide](docs/install-guide.zh-CN.md) for profile migration.

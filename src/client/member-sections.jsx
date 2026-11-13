@@ -1,24 +1,76 @@
 import { React } from './react.js'
 import { t, toolHint, toolLabel } from './i18n.js'
-import { isCapabilityEnabled, updateCapabilitySelection } from './capabilities.js'
+import { isCapabilityEnabled, isProductDataCapability, updateCapabilitySelection } from './capabilities.js'
 import {
   COMMUNICATION_KEYS, STATE_ACCESS, TRIGGER_TYPES,
   allows, clearStateRule, communicationGaps, defaultCondition, dependents, effectiveStateRule, omitKeys, replaceTrigger,
   selectPublisher, setStateAccess, toggleAllowlist, toggleTrigger, toggleTrustedTool, unsupportedParameters
 } from './editor-model.js'
 import { conditionProblem, modelInfo, presetInfo } from './summaries.js'
-import { Check, Field, JsonField, More, PeerChecklist, Radio } from './fields.jsx'
+import { Check, Field, Icon, JsonField, More, PeerChecklist, Radio } from './fields.jsx'
 import { nameList } from './format.js'
 import { ConditionTree } from './condition-editor.jsx'
 import { conditionValueInvalid } from './typed-field.jsx'
 import { HandoffEditor } from './handoff-editor.jsx'
 import { stateChoices } from './author-model.js'
 import { EventTriggerFields } from './event-trigger-editor.jsx'
+import { promptOutline, promptParameters } from './prompt-outline.js'
 
 const TRUST_IDS = ['builtin:workspace', 'builtin:creator', 'builtin:plugin-discovery', 'native:preset', 'builtin:mcp-resources', 'builtin:collaboration', 'builtin:other']
 const numberOrEmpty = value => value === '' ? '' : Number(value)
 
-export function IdentitySection({ member, options, edit, json }) {
+export function PromptSection({ member, config, edit, focus, onFocus }) {
+  const areaRef = React.useRef(null)
+  const text = member.systemPrompt
+  const outline = React.useMemo(() => promptOutline(text), [text])
+  const used = React.useMemo(() => promptParameters(text), [text])
+  const parameters = config.authorParameters || []
+  const jump = offset => {
+    const area = areaRef.current
+    if (!area) return
+    // Blur first: the browser only scrolls a textarea to its caret when focus arrives.
+    area.blur()
+    area.setSelectionRange(offset, offset)
+    area.focus()
+  }
+  const tools = <div className="rp-team-prompt-tools">
+    <span className="rp-team-prompt-count">{t('charCount', { n: text.length })}</span>
+    {outline.length ? <span className="rp-team-prompt-outline" role="group" aria-label={t('prompt.outline')}>
+      {outline.map(item => <button key={item.offset} type="button" onClick={() => jump(item.offset)}>{item.label}</button>)}
+    </span> : null}
+    <button type="button" className="rp-team-quiet is-bordered rp-team-prompt-focus" aria-pressed={focus} onClick={() => onFocus(!focus)}>
+      <Icon name={focus ? 'shrink' : 'expand'} />{focus ? t('prompt.exitFocus') : t('prompt.focus')}
+    </button>
+  </div>
+  const area = <textarea ref={areaRef} className="rp-team-prompt" rows={14} spellCheck="false" aria-label={t('systemPrompt')} value={text}
+    onChange={event => edit({ systemPrompt: event.target.value })}
+    onKeyDown={event => { if (event.key === 'Escape' && focus) { event.stopPropagation(); onFocus(false) } }} />
+  const paramNote = used.length ? <p className="rp-team-note rp-team-prompt-params">{t('prompt.params')}
+    {used.map(id => {
+      const parameter = parameters.find(item => item.id === id)
+      return <span key={id} className={`rp-team-chip ${parameter ? '' : 'is-warn'}`} title={`{{param:${id}}}`}>{parameter ? parameter.name : t('prompt.unknownParam', { id })}</span>
+    })}</p> : null
+  if (focus) return <div className="rp-team-prompt-stage">
+    <div className="rp-team-prompt-stage-head"><strong>{member.name}</strong><span>{t('systemPrompt')}</span></div>
+    {tools}{area}{paramNote}
+  </div>
+  return <>
+    <div className="rp-team-grid is-name">
+      <Field label={t('name')} hint={t('stableIdHint', { id: member.id })}>
+        <input value={member.name} onChange={event => edit({ name: event.target.value })} />
+      </Field>
+    </div>
+    <Field label={t('description')} hint={t('descriptionHint')}>
+      <textarea rows={2} value={member.description} onChange={event => edit({ description: event.target.value })} />
+    </Field>
+    <div className="rp-team-field rp-team-prompt-field">
+      <span className="rp-team-field-label">{t('systemPrompt')}</span>
+      {tools}{area}{paramNote}
+    </div>
+  </>
+}
+
+export function ModelSection({ member, options, edit, json }) {
   const radio = React.useId()
   const lastRoute = React.useRef(null)
   const route = member.modelRef === 'inherit' ? null : member.modelRef
@@ -33,16 +85,6 @@ export function IdentitySection({ member, options, edit, json }) {
   const original = id => options ? t('originalReference', { id }) : id
   const parametersJson = json('parameters', value => ({ parameters: value }))
   return <>
-    <Field label={t('name')} hint={t('stableIdHint', { id: member.id })}>
-      <input value={member.name} onChange={event => edit({ name: event.target.value })} />
-    </Field>
-    <Field label={t('description')} hint={t('descriptionHint')}>
-      <textarea rows={2} value={member.description} onChange={event => edit({ description: event.target.value })} />
-    </Field>
-    <Field label={t('systemPrompt')} hint={t('charCount', { n: member.systemPrompt.length })}>
-      <textarea className="rp-team-prompt" rows={8} value={member.systemPrompt} onChange={event => edit({ systemPrompt: event.target.value })} />
-    </Field>
-
     <fieldset className="rp-team-group">
       <legend>{t('model')}</legend>
       <div className="rp-team-choice-row">
@@ -190,6 +232,7 @@ export function StateSection({ member, config, edit, json }) {
   const stateJson = json('statePermissions', statePermissions => ({ statePermissions }))
   const extra = member.statePermissions.filter(rule => !definitions.some(definition => definition.namespace === rule.namespace && definition.path === rule.path))
   return <>
+    <h4 className="rp-team-subhead">{t('section.state')}</h4>
     <p className="rp-team-note">{t('stateHelp')}</p>
     {definitions.length ? <table className="rp-team-state-table">
       <thead><tr><th scope="col">{t('statePath')}</th><th scope="col">{t('stateAccess')}</th></tr></thead>
@@ -251,9 +294,11 @@ export function OutputSection({ member, config, options, edit, json, changeConfi
     </fieldset>
     <fieldset className="rp-team-group">
       <legend>{t('capabilities')}</legend>
+      <p className="rp-team-note">{t('teamDataToolsHelp')}</p>
       <p className="rp-team-note">{member.capabilities.length ? t('capabilitiesExplicit') : t('capabilitiesInherited')}</p>
       {!options ? <p className="rp-team-note">{t('loadingOptions')}</p> : !capabilities.length ? <p className="rp-team-note">{t('emptyCapabilities')}</p> : null}
-      {capabilities.map(item => <Check key={item.id} label={toolLabel(item)} hint={toolHint(item) || item.id} checked={isCapabilityEnabled(member.capabilities, item)}
+      {capabilities.map(item => <Check key={item.id} label={toolLabel(item)} hint={isProductDataCapability(item.id) ? t('productToolsReplaced') : toolHint(item) || item.id}
+        disabled={isProductDataCapability(item.id)} checked={!isProductDataCapability(item.id) && isCapabilityEnabled(member.capabilities, item)}
         onChange={enabled => edit({ capabilities: updateCapabilitySelection(member.capabilities, capabilities, item.id, enabled) })} />)}
       {options ? unknown.map(item => <Check key={item.id} label={item.id} hint={t('unknownCapability')} checked={item.enabled}
         onChange={enabled => edit({ capabilities: member.capabilities.map(entry => entry.id === item.id ? { ...entry, enabled } : entry) })} />) : null}

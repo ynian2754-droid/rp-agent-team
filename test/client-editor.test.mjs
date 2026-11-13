@@ -13,6 +13,16 @@ import {
 } from '../src/client/editor-model.js'
 import { conditionProblem, memberIssues, modelInfo, stateCounts, triggerTypes } from '../src/client/summaries.js'
 import { createConversationStore } from '../src/client/store.js'
+import { isProductDataCapability } from '../src/client/capabilities.js'
+
+test('retired product-tool switches stay distinguishable from generic DSH capabilities', () => {
+  for (const id of ['builtin:setting-library', 'builtin:variables', 'builtin:roleplay-workflow']) {
+    assert.equal(isProductDataCapability(id), true)
+  }
+  for (const id of ['builtin:workspace', 'builtin:web', 'builtin:subagents', 'external:mcp']) {
+    assert.equal(isProductDataCapability(id), false)
+  }
+})
 
 const asymmetric = () => examplePresets()[1]
 const generic = () => examplePresets()[0]

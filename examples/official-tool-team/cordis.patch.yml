@@ -1,0 +1,3 @@
+- insert:
+    - id: rp-team-official-tool
+      name: './index.mjs'

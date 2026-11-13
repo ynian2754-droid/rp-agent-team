@@ -1,5 +1,5 @@
 import { build } from 'esbuild'
-import { cp, mkdir, readFile, readdir, rm } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
@@ -30,6 +30,20 @@ async function copyTree(source, target) {
 await copyTree(hostSource, path.join(dist, 'host'))
 await mkdir(path.join(dist, 'shared'), { recursive: true })
 await copyTree(path.join(root, 'src', 'shared'), path.join(dist, 'shared'))
+
+// A forked worker does not run through DSH's plugin module resolver. Ship its
+// private dependencies (including YAML) in the worker; the official Host entry
+// remains a dynamic import supplied by the isolated trial plan.
+await build({
+  entryPoints: [path.join(hostSource, 'trial-worker.mjs')],
+  outfile: path.join(dist, 'host', 'trial-worker.mjs'),
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: ['node24'],
+  banner: {js: "import {createRequire as workerCreateRequire} from 'node:module'; const require = workerCreateRequire(import.meta.url);"},
+  legalComments: 'none'
+})
 
 const remoteConfigPath = path.join(root, 'scripts', 'tsconfig.remote.json')
 const remoteConfigFile = ts.readConfigFile(remoteConfigPath, ts.sys.readFile)
@@ -76,6 +90,14 @@ await build({
   external: ['react'],
   legalComments: 'none'
 })
+
+// The bundle uses CSS modules for its native-ledger composition. Inject these
+// styles through the same owned style node, so disable/uninstall removes them.
+const trajectoryCss = await readFile(path.join(dist, 'client.css'), 'utf8')
+const withStyles = (await readFile(path.join(dist, 'client.js'), 'utf8'))
+  .replace(/['"]__RP_TEAM_TRAJECTORY_CSS__['"]/u, JSON.stringify(trajectoryCss))
+if (withStyles.includes('__RP_TEAM_TRAJECTORY_CSS__')) throw new Error('Trajectory stylesheet was not embedded')
+await writeFile(path.join(dist, 'client.js'), withStyles)
 
 const hostEntry = path.join(dist, 'host', 'index.mjs')
 await readFile(hostEntry, 'utf8')

@@ -114,3 +114,103 @@ export function eventFields(event, { nameOf = id => id, sourceLabel = type => ty
   }
   return fields
 }
+
+const RAN_STATUSES = new Set(['running', 'complete', 'completed', 'failed', 'cancelled'])
+
+/** Members that were actually activated in a round, as opposed to everyone on the team. */
+export function participants(run) {
+  return runMembers(run).filter(member => RAN_STATUSES.has(member.status))
+}
+
+/** The member a live round is waiting on right now, if any. */
+export function activeMember(run) {
+  return runMembers(run).find(member => member.status === 'running') || runMembers(run).find(member => member.status === 'queued') || null
+}
+
+/**
+ * Why a member that never started stayed out of a round, read from its configured triggers.
+ * Codes are translated by the page; they describe the rule, not a recorded event.
+ */
+export function idleReasons(agent) {
+  const triggers = agent?.triggers || []
+  if (!triggers.length) return [{ code: 'noTrigger' }]
+  const reasons = []
+  const add = reason => { if (!reasons.some(item => item.code === reason.code)) reasons.push(reason) }
+  for (const trigger of triggers) {
+    if (trigger.type === 'always') add({ code: 'notReached' })
+    else if (trigger.type === 'requested_by_agent') add({ code: 'onRequest', from: trigger.from || [] })
+    else if (trigger.type === 'periodic') add({ code: 'periodic', every: trigger.every })
+    else if (trigger.type === 'manual') add({ code: 'manual' })
+    else if (trigger.type === 'condition') add({ code: 'condition' })
+    else if (trigger.type === 'keyword') add({ code: 'keyword' })
+    else if (trigger.type === 'state_changed') add({ code: 'stateChanged' })
+    else if (trigger.type === 'message_received') add({ code: 'messageReceived' })
+  }
+  return reasons
+}
+
+/** How an activated member entered the round: one of its own triggers, or another member's request. */
+export function activationCause(events = [], agentId) {
+  const event = events.find(item => item.agentId === agentId && (item.type === 'activation.queued' || item.type === 'activation.started'))
+  if (!event) return null
+  const data = event.data || {}
+  if (data.requestedBy) return { type: 'request', by: String(data.requestedBy) }
+  const reason = data.reason
+  if (reason && typeof reason === 'object') {
+    if (reason.type === 'handoff_resume') return { type: 'resume' }
+    const triggers = Array.isArray(reason.triggers) ? reason.triggers.map(item => typeof item === 'string' ? item : item?.type).filter(Boolean) : []
+    if (triggers.length) return { type: 'trigger', triggers: [...new Set(triggers)] }
+    if (reason.type && reason.type !== 'initial') return { type: 'trigger', triggers: [reason.type] }
+  }
+  return { type: 'trigger', triggers: [] }
+}
+
+/** What a member did besides answering: who it asked or told, and what it wrote. Counts only recorded events. */
+export function memberActivity(events = [], agentId) {
+  const activity = { requests: 0, asked: [], told: [], writes: 0, failures: [] }
+  const push = (list, id) => { if (id && !list.includes(id)) list.push(id) }
+  for (const event of events) {
+    if (event.agentId !== agentId) continue
+    const data = event.data || {}
+    if (event.type === 'model.usage') activity.requests++
+    else if (event.type === 'message.requested' || event.type === 'handoff.request_queued') push(activity.asked, data.to)
+    else if (event.type === 'message.sent') for (const id of Array.isArray(data.to) ? data.to : [data.to]) push(activity.told, id)
+    else if (event.type === 'state.operation' && ['write', 'set', 'remove'].includes(data.operation)) activity.writes++
+    else if (event.type === 'activation.blocked') activity.failures.push(String(data.reason || 'blocked'))
+  }
+  return activity
+}
+
+/** Sums only numbers a provider reported. `known` is false when any activated member is missing usage. */
+export function runTotals(run, events = []) {
+  const ran = participants(run)
+  let tokens = 0
+  let known = ran.length > 0
+  for (const member of ran) {
+    const total = member.tokens?.totalTokens ?? ((member.tokens?.inputTokens ?? NaN) + (member.tokens?.outputTokens ?? NaN))
+    if (Number.isFinite(total)) tokens += total
+    else if (member.status !== 'running' && !member.reusedFromRunId) known = false
+  }
+  const requests = events.filter(event => event.type === 'model.usage').length
+  const started = Date.parse(run?.startedAt || run?.createdAt || '')
+  const ended = Date.parse(run?.updatedAt || '')
+  return {
+    tokens, tokensKnown: known, requests,
+    elapsedMs: Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? ended - started : null
+  }
+}
+
+/** 1234 -> "1.2k"; small numbers stay exact so short runs are not rounded away. */
+export function compactNumber(value) {
+  if (!Number.isFinite(value)) return ''
+  if (value < 1000) return String(value)
+  if (value < 10000) return `${(value / 1000).toFixed(1).replace(/\.0$/, '')}k`
+  return `${Math.round(value / 1000)}k`
+}
+
+export function formatElapsed(ms) {
+  if (!Number.isFinite(ms)) return ''
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`
+  return `${Math.floor(ms / 60000)}m${String(Math.round((ms % 60000) / 1000)).padStart(2, '0')}s`
+}

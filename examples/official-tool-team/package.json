@@ -1,0 +1,15 @@
+{
+  "name": "@rp-team/official-tool-team",
+  "version": "0.1.0",
+  "description": "Public-API two-member ElecKoi team tool proof of concept",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": { ".": "./index.mjs", "./package.json": "./package.json" },
+  "files": ["index.mjs", "runtime.mjs", "journal.mjs", "cordis.patch.yml", "README.zh-CN.md"],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-scope": "0.2.0-rc.2"
+  },
+  "engines": { "dsh": "0.2.0-rc.2" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

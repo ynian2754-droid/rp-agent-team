@@ -152,3 +152,59 @@ test('scheduler runs declared dependencies and a dynamically requested agent wit
   await assert.rejects(communication.send({ from: 'actor', to: 'scribe', body: 'Not allowed by sendTo.' }), { code: 'RP_TEAM_MESSAGE_NOT_ALLOWED' })
   await assert.rejects(communication.request({ from: 'memory', to: 'scribe', body: 'Not requestable.' }), { code: 'RP_TEAM_REQUEST_NOT_ALLOWED' })
 })
+
+test('active user inputs only count real user messages still appended on the Session surface', async () => {
+  const { activeUserInputIds, isAppendedSurfaceEvent } = await import('../src/host/session-event-policy.mjs')
+  const events = [
+    { type: 'user/message', seq: 1, surfaceOp: 'append', data: { id: 'u1', role: 'user', source: { kind: 'user' } } },
+    { type: 'user/message', seq: 2, surfaceOp: 'replace', data: { id: 'u1-edited-away', role: 'user', source: { kind: 'user' } } },
+    { type: 'user/message', seq: 3, surfaceOp: 'append', data: { id: 'ctx', role: 'user', source: { kind: 'runtime-context' } } },
+    { type: 'user/message', seq: 4, data: { id: 'legacy', role: 'user', source: { kind: 'user' } } },
+    { type: 'user/message', seq: 5, surfaceOp: 'append', data: { id: 'u1', role: 'user', source: { kind: 'user' } } }
+  ]
+  assert.deepEqual(activeUserInputIds(events, { id: 'current', source: { kind: 'user' } }), ['u1', 'legacy', 'current'])
+  assert.equal(isAppendedSurfaceEvent({ surfaceOp: 'replace' }), false)
+  assert.equal(isAppendedSurfaceEvent({}), true, 'hosts older than 0.2.20 did not mark the surface operation')
+})
+test('a retry reuses preserved members: their old writes are kept, the rerun ones are not replayed, and conditions do not restart them', async () => {
+  const { writesToReplayOnRetry } = await import('../src/host/run-state.mjs')
+  const writes = [
+    { agentId: 'scribe', namespace: 'shared', path: '/notes/0' },
+    { agentId: 'actor', namespace: 'shared', path: '/memory/0' }
+  ]
+  assert.deepEqual(writesToReplayOnRetry(writes, ['actor']).map(write => write.agentId), ['scribe'],
+    'the publisher runs again on retry, so its earlier memory write must not be replayed as well')
+
+  const base = defaultTeamConfig()
+  base.state.definitions = [{ namespace: 'world', path: '/scene', type: 'string', default: 'rain' }]
+  base.agents[0].statePermissions = [{ namespace: 'world', path: '/scene', access: 'read' }]
+  base.agents[0].triggers = [{ type: 'always' }, { type: 'condition', condition: { op: 'exists', namespace: 'world', path: '/scene' } }]
+  const config = normalizeTeamConfig(base)
+  const activated = []
+  const scheduler = createScheduler({
+    config, skipAgentIds: ['agent-1'], forceAgentIds: ['agent-2'],
+    evaluateCondition: async () => true,
+    onActivate: async ({ agent }) => { activated.push(agent.id) }
+  })
+  await scheduler.run()
+  assert.deepEqual(activated, ['agent-2'], 'the preserved member is not started again by its condition')
+})
+test('a member a retry reuses is not restarted by keyword or periodic matches and keeps its complete status', async () => {
+  const { createTriggerTracker } = await import('../src/host/event-triggers.mjs')
+  const base = defaultTeamConfig()
+  base.agents[0].triggers = [{ type: 'keyword', keywords: ['door'] }, { type: 'periodic', every: 1, offset: 0 }]
+  const config = normalizeTeamConfig(base)
+  const activated = []
+  const traces = []
+  const scheduler = createScheduler({
+    config, skipAgentIds: ['agent-1'], forceAgentIds: ['agent-2'],
+    triggerTracker: createTriggerTracker({ config, currentInput: 'open the door', userTurnOrdinal: 3 }),
+    onTrace: event => traces.push(event),
+    onActivate: async ({ agent }) => { activated.push(agent.id) }
+  })
+  const status = await scheduler.run()
+  assert.deepEqual(activated, ['agent-2'])
+  assert.equal(status.agents['agent-1'].status, 'complete')
+  assert.ok(!traces.some(event => event.type === 'activation.skipped' && event.agentId === 'agent-1'),
+    'a skipped trace would turn the reused member into "skipped" and lose its writes on a second retry')
+})

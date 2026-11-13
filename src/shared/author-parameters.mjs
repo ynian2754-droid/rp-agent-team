@@ -3,6 +3,9 @@ import { normalizeTeamConfig, teamError } from './schema.mjs'
 
 const PARAMETER_TYPES = new Set(['text', 'number', 'boolean', 'choice', 'agent', 'model', 'state'])
 const BINDING_MODES = new Set(['set', 'text'])
+// Types whose value can be written into a prompt: text verbatim, a number in decimal, and choices and switches
+// through the prompt text the author attached to each option or state (like toggling a preset entry).
+const TEXT_BINDING_TYPES = new Set(['text', 'number', 'choice', 'boolean'])
 const SHA256_K = [
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -26,6 +29,25 @@ export function normalizeAuthorParameters(value, agents, definitions) {
     ids.add(parameter.id)
   }
   return parameters
+}
+
+/** True when declarations use prompt insertion from choices, switches or numbers, or groups (plugin 0.7.0). */
+export function usesParameterInsertions(parameters) {
+  return (parameters ?? []).some(parameter => parameter.group !== undefined
+    || parameter.textOn !== undefined || parameter.textOff !== undefined
+    || (parameter.options ?? []).some(option => option.text !== undefined)
+    || (parameter.type !== 'text' && (parameter.bindings ?? []).some(binding => binding.mode === 'text')))
+}
+
+/** The prompt text a parameter value inserts at its {{param:id}} token. */
+export function parameterInsertText(parameter, value) {
+  switch (parameter.type) {
+    case 'text': return value
+    case 'number': return String(value)
+    case 'boolean': return (value ? parameter.textOn : parameter.textOff) ?? ''
+    case 'choice': return parameter.options?.find(option => stableJson(option.value) === stableJson(value))?.text ?? ''
+    default: throw invalid(`Author parameter ${parameter.id} cannot be inserted as text`)
+  }
 }
 
 /** Validate supplied overrides, preserving the distinction between absent values and defaults. */
@@ -75,12 +97,12 @@ export function resolveAuthorParameters(config, values = {}) {
     for (const binding of parameter.bindings) {
       const target = resolveTarget(resolvedDraft, binding.target)
       if (binding.mode === 'text') {
-        if (parameter.type !== 'text' || typeof target.value !== 'string') {
+        if (!TEXT_BINDING_TYPES.has(parameter.type) || typeof target.value !== 'string') {
           throw invalid(`Text binding for ${parameter.id} must target an existing string field`)
         }
         const marker = `{{param:${parameter.id}}}`
         if (!target.value.includes(marker)) throw invalid(`Text binding for ${parameter.id} has no ${marker} token at its target`)
-        const next = target.value.split(marker).join(value)
+        const next = target.value.split(marker).join(parameterInsertText(parameter, value))
         if (next !== target.value) {
           changes.push(change(parameter.id, binding, target.value, next, false))
           target.set(next)
@@ -109,11 +131,12 @@ export function resolveAuthorParameters(config, values = {}) {
 
 function normalizeParameter(value, index, agents, agentIds, definitions) {
   if (!isRecord(value)) throw invalid(`authorParameters[${index}] must be an object`)
-  rejectUnknown(value, ['id', 'name', 'description', 'type', 'default', 'options', 'valueSchema', 'bindings'], `authorParameters[${index}]`)
+  rejectUnknown(value, ['id', 'name', 'group', 'description', 'type', 'default', 'options', 'textOn', 'textOff', 'valueSchema', 'bindings'], `authorParameters[${index}]`)
   const id = identifier(value.id, `authorParameters[${index}].id`)
   const name = requiredText(value.name, `authorParameters[${index}].name`)
   if (!PARAMETER_TYPES.has(value.type)) throw invalid(`Author parameter ${id} has an unsupported type`)
   const parameter = { id, name, type: value.type }
+  if (value.group !== undefined) parameter.group = requiredText(value.group, `Author parameter ${id} group`)
   if (value.description !== undefined) parameter.description = textOrEmpty(value.description, `Author parameter ${id} description`)
   if (value.valueSchema !== undefined) parameter.valueSchema = normalizeValueSchema(value.valueSchema, `Author parameter ${id} valueSchema`)
   if (value.options !== undefined) {
@@ -122,8 +145,11 @@ function normalizeParameter(value, index, agents, agentIds, definitions) {
     }
     const options = value.options.map((option, optionIndex) => {
       if (!isRecord(option)) throw invalid(`Author parameter ${id} option ${optionIndex} must be an object`)
-      rejectUnknown(option, ['label', 'value'], `Author parameter ${id} option ${optionIndex}`)
-      return { label: requiredText(option.label, `Author parameter ${id} option label`), value: cloneJson(option.value) }
+      rejectUnknown(option, ['label', 'value', 'text'], `Author parameter ${id} option ${optionIndex}`)
+      return {
+        label: requiredText(option.label, `Author parameter ${id} option label`), value: cloneJson(option.value),
+        ...(option.text === undefined ? {} : { text: textOrEmpty(option.text, `Author parameter ${id} option ${optionIndex} text`) })
+      }
     })
     if (new Set(options.map(option => stableJson(option.value))).size !== options.length) {
       throw invalid(`Author parameter ${id} options must have distinct values`)
@@ -131,6 +157,11 @@ function normalizeParameter(value, index, agents, agentIds, definitions) {
     parameter.options = options
   } else if (value.type === 'choice') {
     throw invalid(`Choice parameter ${id} requires options`)
+  }
+  for (const key of ['textOn', 'textOff']) {
+    if (value[key] === undefined) continue
+    if (value.type !== 'boolean') throw invalid(`Author parameter ${id} ${key} is only valid for a switch`)
+    parameter[key] = textOrEmpty(value[key], `Author parameter ${id} ${key}`)
   }
   if (Object.hasOwn(value, 'default')) {
     parameter.default = validateParameterValue({ ...parameter, options: parameter.options }, value.default, agents, definitions, `Author parameter ${id} default`)
@@ -143,6 +174,14 @@ function normalizeParameter(value, index, agents, agentIds, definitions) {
     if (binding.mode === 'set' && bindingKeys.has(key)) throw invalid(`Author parameter ${id} binds the same target more than once`)
     if (binding.mode === 'set') bindingKeys.add(key)
   }
+  if (parameter.bindings.some(binding => binding.mode === 'text')) {
+    if (parameter.type === 'choice' && parameter.options.some(option => option.text === undefined)) {
+      throw invalid(`Choice parameter ${id} inserts prompt text, so every option needs its text`)
+    }
+    if (parameter.type === 'boolean' && parameter.textOn === undefined && parameter.textOff === undefined) {
+      throw invalid(`Switch parameter ${id} inserts prompt text, so it needs textOn or textOff`)
+    }
+  }
   return parameter
 }
 
@@ -150,7 +189,9 @@ function normalizeBinding(value, parameterId, parameterType, agents, agentIds, d
   if (!isRecord(value)) throw invalid(`Author parameter ${parameterId} binding ${index} must be an object`)
   rejectUnknown(value, ['target', 'mode', 'valuePath'], `Author parameter ${parameterId} binding ${index}`)
   if (!BINDING_MODES.has(value.mode)) throw invalid(`Author parameter ${parameterId} binding ${index} has an unsupported mode`)
-  if (value.mode === 'text' && parameterType !== 'text') throw invalid(`Text binding ${parameterId} requires a text parameter`)
+  if (value.mode === 'text' && !TEXT_BINDING_TYPES.has(parameterType)) {
+    throw invalid(`Text binding ${parameterId} requires a text, number, choice or switch parameter`)
+  }
   const target = normalizeTarget(value.target, parameterId, agents, agentIds, definitions)
   const result = { target, mode: value.mode }
   if (value.valuePath !== undefined) result.valuePath = jsonPointer(value.valuePath, `Author parameter ${parameterId} valuePath`)

@@ -303,6 +303,8 @@ test('StateStore enforces ACLs and staged per-path CAS, then recovers state from
     store.write({ conversationId: 'conversation-1', runId: 'run-1', agentId: 'agent-1', namespace: 'world', path: '/settings/chapters~1scene.md', value: 'New text.', expectedVersion: 0 })
     assert.throws(() => store.write({ conversationId: 'conversation-1', runId: 'run-1', agentId: 'agent-1', namespace: 'world', path: '/settings/chapters/scene.md', value: 'nested path', expectedVersion: 0 }), { code: 'RP_TEAM_STATE_TYPE_MISMATCH' })
     assert.throws(() => store.write({ conversationId: 'conversation-1', runId: 'run-1', agentId: 'agent-1', namespace: 'world', path: '/settings/scene.md', value: null, expectedVersion: 0 }), { code: 'RP_TEAM_STATE_TYPE_MISMATCH' })
+    assert.throws(() => store.write({ conversationId: 'conversation-1', runId: 'run-1', agentId: 'agent-1', namespace: 'world', path: '/settings/runtime-only.md', value: 'text', expectedVersion: 0 }), { code: 'RP_TEAM_STATE_PATH_UNDEFINED' },
+      'an entry without an editable original fails at write time, not after the whole team has run')
     const pending = store.stage({ conversationId: 'conversation-1', runId: 'run-1' })
     assert.equal(pending.status, 'pending')
     assert.deepEqual(pending.writes, [
@@ -474,3 +476,78 @@ test('StateStore journals ACL-checked removals, rolls them back, commits them, a
   })
 })
 
+
+test('StateStore preserves earlier array appends when rewriting an index in the same run', async () => {
+  await inTempHome(async home => {
+    const config = defaultTeamConfig()
+    config.state.definitions = [{ namespace: 'shared', path: '/queue', type: 'array', default: [] }]
+    config.agents[0].statePermissions = [{ namespace: 'shared', path: '/queue', access: 'readwrite' }]
+    const store = new StateStore(home)
+    const ids = { conversationId: 'conversation-1', runId: 'array-rewrite', agentId: config.agents[0].id, namespace: 'shared' }
+    store.begin({ ...ids, config })
+
+    for (const [path, value] of [['/queue/0', 'first'], ['/queue/1', 'second'], ['/queue/0', 'updated']]) {
+      store.write({ ...ids, path, value, expectedVersion: store.read({ ...ids, path }).version })
+    }
+
+    const reopened = new StateStore(home)
+    assert.deepEqual(reopened.read({ ...ids, path: '/queue' }).value, ['updated', 'second'])
+    reopened.stage(ids)
+    reopened.commit({ ...ids, receipt: { outcome: 'committed' } })
+    assert.deepEqual(reopened.committedSnapshot(ids).namespaces.shared.queue, ['updated', 'second'])
+  })
+})
+
+test('StateStore respects ancestor write order and drops a consecutive creation and removal of a new key', async () => {
+  await inTempHome(async home => {
+    const config = defaultTeamConfig()
+    config.state.definitions = [{ namespace: 'shared', path: '', type: 'object', default: {} }]
+    config.agents[0].statePermissions = [{ namespace: 'shared', path: '', access: 'readwrite' }]
+    const store = new StateStore(home)
+    const agentId = config.agents[0].id
+    let sequence = 0
+    function play(initial, operations) {
+      const runId = `ordered-${++sequence}`
+      store.begin({ conversationId: 'conversation-1', runId, config, initialState: { shared: initial } })
+      const ids = { conversationId: 'conversation-1', runId, agentId, namespace: 'shared' }
+      for (const [operation, path, value] of operations) {
+        const expectedVersion = store.version({ ...ids, path }).version
+        if (operation === 'write') store.write({ ...ids, path, value, expectedVersion })
+        else store.remove({ ...ids, path, expectedVersion })
+      }
+      return { runId, ids, value: store.read({ ...ids, path: '/x' }).value }
+    }
+
+    const createdThenRemoved = play({ x: {} }, [['write', '/x/k', 1], ['remove', '/x/k']])
+    assert.deepEqual(createdThenRemoved.value, {}, 'removing a key created earlier in the run leaves later reads working')
+    assert.deepEqual(store.status({ conversationId: 'conversation-1', runId: createdThenRemoved.runId }).writes, [])
+    assert.deepEqual(store.stage({ conversationId: 'conversation-1', runId: createdThenRemoved.runId }).writes, [])
+    store.commit({ conversationId: 'conversation-1', runId: createdThenRemoved.runId, receipt: { outcome: 'committed' } })
+    const afterNoOp = store.begin({ conversationId: 'conversation-1', runId: 'after-no-op', config, initialState: { shared: { x: {} } } })
+    assert.deepEqual(afterNoOp.state.shared, { x: {} })
+    store.rollback({ conversationId: 'conversation-1', runId: 'after-no-op' })
+
+    const childAfterParent = play({ x: {} }, [['write', '/x/k', 1], ['write', '/x', {}], ['write', '/x/k', 2]])
+    assert.deepEqual(childAfterParent.value, { k: 2 }, 'a rewritten child replays after the later parent write')
+    store.rollback({ conversationId: 'conversation-1', runId: childAfterParent.runId })
+
+    const grandchildAfterRemoval = play({ x: { k: {} } }, [['write', '/x/k/s', 1], ['remove', '/x/k'], ['write', '/x/k/s', 2]])
+    assert.deepEqual(grandchildAfterRemoval.value, { k: { s: 2 } }, 'a rewritten grandchild replays after the parent removal')
+    store.rollback({ conversationId: 'conversation-1', runId: grandchildAfterRemoval.runId })
+
+    const recreatedUnderRemoval = play({ x: {} }, [['write', '/x/b/c', 1], ['remove', '/x/b'], ['write', '/x/b/c', 2]])
+    assert.deepEqual(recreatedUnderRemoval.value, { b: { c: 2 } }, 'a later child write can recreate the removed parent')
+    assert.deepEqual(store.stage(recreatedUnderRemoval.ids).writes.map(write => write.path), ['/x/b/c', '/x/b', '/x/b/c'])
+    store.rollback({ conversationId: 'conversation-1', runId: recreatedUnderRemoval.runId })
+
+    const changedThenRemoved = play({ x: { k: 0, keep: true } }, [['write', '/x/k', 1], ['remove', '/x/k']])
+    assert.deepEqual(changedThenRemoved.value, { keep: true })
+    assert.deepEqual(store.stage({ conversationId: 'conversation-1', runId: changedThenRemoved.runId }).writes, [{
+      namespace: 'shared', path: '/x/k', operation: 'remove', expectedVersion: 0, agentId
+    }], 'removing a committed key after changing it still journals the removal')
+    store.commit({ conversationId: 'conversation-1', runId: changedThenRemoved.runId, receipt: { outcome: 'committed' } })
+    const afterRemoval = store.begin({ conversationId: 'conversation-1', runId: 'after-removal', config, initialState: { shared: { x: { k: 0, keep: true } } } })
+    assert.deepEqual(afterRemoval.state.shared, { x: { keep: true } })
+    store.rollback({ conversationId: 'conversation-1', runId: 'after-removal' })
+  })
+})

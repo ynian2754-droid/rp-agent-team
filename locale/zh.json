@@ -1,4 +1,6 @@
 {
+  "teamDataToolsHelp": "资料读取由“上下文”控制，变量、设定和记忆修改由“状态权限”控制；使用团队自己的工具，不再开放 ElecKoi 原生产品工具。",
+  "productToolsReplaced": "旧配置项保留兼容；不开放宿主工具，也不限制已授权的团队资料读取。",
   "team": "角色团队",
   "settingsTitle": "自由组合角色的认知与协作",
   "toolLabels": {
@@ -53,7 +55,7 @@
   "statusUnavailable": "团队状态暂不可用",
   "viewRun": "查看本轮协作",
   "viewReason": "查看原因",
-  "viewCollaboration": "协作轨迹",
+  "viewCollaboration": "协作概览",
   "memberCount": "{n} 名成员",
   "status": {
     "preparing": "正在准备成员",
@@ -155,13 +157,18 @@
     "publishes": "输出正文",
     "noAuthority": "没有产出权限",
     "tools": "工具 {n} 项",
-    "trusted": "信任外部工具 {n} 项"
+    "trusted": "信任外部工具 {n} 项",
+    "handoffs": "交接给 {names}"
   },
   "triggerShort": {
     "always": "每轮",
     "manual": "手动",
     "requested_by_agent": "被调用时",
-    "condition": "满足条件时"
+    "condition": "满足条件时",
+    "periodic": "按轮次",
+    "keyword": "命中关键词时",
+    "state_changed": "状态变化时",
+    "message_received": "收到消息时"
   },
   "sourceShort": {
     "current_input": "当前输入",
@@ -812,7 +819,8 @@
     "dismissUnknown": "结束这次查询",
     "confirmDismissUnknown": "确认结束，保留编辑草稿",
     "committedValue": "已经保存的值",
-    "unknownPastValues": "这个旧记录缺少部分历史值。请选择有记录的状态，不会用当前值代替。"
+    "unknownPastValues": "这个旧记录缺少部分历史值。请选择有记录的状态，不会用当前值代替。",
+    "emptyValue": "（空）"
   },
   "params": {
     "title": "使用参数",
@@ -821,14 +829,18 @@
     "empty": "作者尚未提供使用参数。",
     "changes": "查看参数实际改动",
     "author": "作者：定义可调参数",
-    "authorHelp": "为常用设置提供入口，可绑定多个字段。文字可用下方标记插入提示词；权限改动同样会显示。",
+    "authorHelp": "为常用设置提供入口，可绑定多个字段。文字、数字、选项和开关都能用下方标记插入提示词：选项和开关插入作者为每一档写好的文字，像酒馆预设条目一样切换。权限改动同样会显示。",
     "type": "参数类型",
     "default": "作者默认值",
     "constraints": "取值要求",
     "new": "新参数",
+    "group": "分组",
+    "groupHint": "同一分组的参数在使用参数页放在一起，例如「呈现」「裁定」。留空则不分组。",
     "add": "添加参数",
     "optionName": "选项名称",
     "addOption": "添加选项",
+    "optionText": "选中时插入的文字",
+    "optionTextHint": "参数以「替换提示词中的参数标记」绑定时，选中这一项就把这段文字放进标记的位置。可以留空。",
     "bindings": "这个参数改变什么",
     "target": "设置范围",
     "stateInitial": "状态初始值",
@@ -837,6 +849,11 @@
     "mode": "应用方式",
     "set": "直接设置",
     "text": "替换提示词中的参数标记",
+    "textOn": "打开时插入的文字",
+    "textOff": "关闭时插入的文字",
+    "switchTextHint": "以「替换提示词中的参数标记」绑定时使用；留空表示不插入任何文字。",
+    "inserts": "查看插入的文字",
+    "insertsEmpty": "这一档不插入任何文字。",
     "permissionHelp": "修改权限会改变成员可见信息或行动范围，请检查实际改动。",
     "valuePart": "只使用参数中的某个字段",
     "valuePath": "字段位置（留空使用全部）",
@@ -970,7 +987,242 @@
     "resubmit": "重新提交同一启动请求",
     "uncommitted": "本次尝试未提交正文或状态；重试将从最后一次已提交检查点继续。",
     "source": "冻结资料来源：{id}",
-    "usageUnknown": "部分请求未返回完整用量。开启 Token 预算时，此任务无法继续请求模型；已提交结果和执行轨迹仍保留。"
+    "usageUnknown": "部分请求未返回完整用量。开启 Token 预算时，此任务无法继续请求模型；已提交结果和执行轨迹仍保留。",
+    "pick": "场景",
+    "noSecond": "不比较，只运行当前草稿",
+    "secondHelp": "预设库里还没有可比较的方案。先在“预设”页把另一个版本存入库。",
+    "budgets": "本次试演的上限",
+    "needInput": "每一轮都需要填写输入。",
+    "loadingB": "正在读取方案 B…",
+    "freezeHelp": "未冻结时，每次试演读取聊天的最新资料。",
+    "saveFirst": "场景尚未保存。",
+    "sceneFile": "场景文件",
+    "pickJob": "选择一次试演",
+    "turnDetails": "这一轮的状态与细节"
   },
-  "turnN": "第 {n} 轮"
+  "turnN": "第 {n} 轮",
+  "nav": {
+    "run": "本轮",
+    "team": "队伍",
+    "presets": "预设",
+    "trial": "试演",
+    "state": "状态"
+  },
+  "navHint": {
+    "run": "这一轮谁参与了、结果如何，下一轮谁会运行",
+    "team": "成员、使用参数与团队设置",
+    "presets": "导入、导出与本机预设库",
+    "trial": "不调用模型检查配置，或在隔离空间里试演",
+    "state": "当前聊天的状态值与记忆"
+  },
+  "teamNav": {
+    "label": "队伍内容",
+    "members": "成员",
+    "params": "使用参数",
+    "settings": "团队设置"
+  },
+  "mtab": {
+    "label": "成员设置",
+    "now": "现在",
+    "prompt": "提示词",
+    "model": "模型",
+    "trigger": "何时运行",
+    "context": "能看到",
+    "links": "协作",
+    "access": "权限"
+  },
+  "mtabHint": {
+    "prompt": "名称、简介与系统提示词",
+    "model": "使用哪个模型、参数与预设",
+    "trigger": "什么时候参与、等谁、失败后怎么办",
+    "context": "运行时能读到哪些内容",
+    "links": "能和谁通信、交接给谁",
+    "access": "状态读写、正文输出与工具"
+  },
+  "shell": {
+    "offTitle": "这个聊天还没有启用团队",
+    "offHelp": "启用后，从下一条消息起由“{name}”的 {n} 名成员协作生成回复。开关立即生效，不需要保存。",
+    "enable": "启用团队",
+    "enableHint": "开关立即生效，只影响当前聊天；配置修改需要另行保存。",
+    "off": "未启用",
+    "unavailable": "不可用",
+    "versionLine": "v{version} · {n} 名成员",
+    "draft": "未保存",
+    "liveIs": "聊天仍在使用“{name}”",
+    "unsaved": "有未保存的修改",
+    "addedMark": "（新增）",
+    "teamSettings": "团队设置",
+    "field": "待修正的内容",
+    "needsFix": "有内容需要修正",
+    "memberWorking": "{name} 正在处理",
+    "viewRound": "查看本轮",
+    "took": "{n} 名成员参与",
+    "enableFailed": "没能切换团队开关。检查成员的“模型”页签后再试：",
+    "dismiss": "关闭提示",
+    "enableError": {
+      "RP_TEAM_CONFIG_CONFLICT": "团队设置刚在别处被保存过，已经重新读取；请再切换一次。",
+      "RP_TEAM_MODEL_REQUIRED": "有成员没有选择模型。",
+      "RP_TEAM_UNSUPPORTED_MODEL_PARAMETER": "有成员设置了所选模型不支持的参数（例如推理强度）。"
+    }
+  },
+  "roster": {
+    "publisher": "输出正文",
+    "added": "新增，尚未保存",
+    "changed": "已修改，尚未保存",
+    "removed": "已移除（未保存）：{names}"
+  },
+  "when": {
+    "periodic": "每 {n} 轮",
+    "requestedBy": "被 {names} 调用时",
+    "requested": "被调用时"
+  },
+  "idle": {
+    "noTrigger": "没有设置参与方式",
+    "notReached": "本轮在轮到它之前就结束了",
+    "onRequest": "只在 {names} 调用时运行，本轮没有被调用",
+    "onRequestAny": "只在被其他成员调用时运行，本轮没有被调用",
+    "periodic": "每 {n} 轮运行一次，本轮不在周期上",
+    "manual": "需要手动选入，本轮没有选",
+    "condition": "触发条件本轮不满足",
+    "keyword": "输入没有命中关键词",
+    "stateChanged": "关注的状态本轮没有变化",
+    "messageReceived": "本轮没有收到指定消息"
+  },
+  "cause": {
+    "request": "由 {name} 调用",
+    "resume": "交接结果返回后继续",
+    "retry": "重试时重新运行",
+    "trigger": "被触发"
+  },
+  "next": {
+    "title": "下一轮谁会运行",
+    "titleTurn": "下一轮（第 {n} 轮）谁会运行",
+    "basedOnSaved": "按已保存的配置推算，未保存的修改不计入。",
+    "failed": "暂时无法推算下一轮。",
+    "loading": "正在推算…",
+    "always": "每轮都运行",
+    "manualSelected": "已手动选入下一轮",
+    "manualIdle": "需要手动选入",
+    "onRequest": "{names} 调用它时才运行",
+    "onRequestAny": "其他成员调用它时才运行",
+    "periodicRun": "每 {n} 轮一次，第 {turn} 轮正好轮到",
+    "periodicSkip": "每 {n} 轮一次，第 {turn} 轮不在周期上",
+    "periodicUnknown": "每 {n} 轮一次",
+    "conditionRun": "触发条件当前满足",
+    "conditionSkip": "触发条件当前不满足",
+    "conditionUnknown": "触发条件要到运行时才能判断",
+    "keyword": "取决于下一条消息是否命中关键词",
+    "onEvent": "本轮内出现相应事件时运行",
+    "cooldown": "冷却中，第 {turn} 轮起才会再次触发"
+  },
+  "nextKind": {
+    "run": "会运行",
+    "request": "等待调用",
+    "depends": "视情况",
+    "skip": "不运行",
+    "never": "不会运行"
+  },
+  "run": {
+    "older": "较早一轮",
+    "newer": "较新一轮",
+    "round": "本轮",
+    "rewound": "已回退",
+    "took": "{n}/{total} 名成员参与",
+    "requests": "{n} 次模型请求",
+    "cast": "谁参与了",
+    "waiting": "等待前面的成员",
+    "skipped": "已跳过",
+    "notYet": "尚未开始",
+    "asked": "调用了 {names}",
+    "told": "发消息给 {names}",
+    "wrote": "写入状态 {n} 次",
+    "elapsed": "用时",
+    "events": "事件记录（{n}）",
+    "openRequests": "查看请求详情",
+    "openLedger": "打开完整轨迹",
+    "ledgerHelp": "逐条查看请求、工具调用与上下文。",
+    "jumpFailed": "无法打开轨迹。",
+    "retryOne": "只重试一名成员…",
+    "rerunMembers": "重新运行未完成的 {n} 名成员",
+    "rerunHelp": "重新运行会沿用这一轮的原始输入；已经完成的成员复用本轮结果。",
+    "rerunThis": "只重新运行此成员",
+    "retryBlocked": {
+      "disabled": "团队已关闭。打开团队后才能重试这一轮。",
+      "config_changed": "这一轮之后团队配置改过了。重试只能沿用这一轮的旧配置，所以不再提供；可以直接重新生成这条回复。"
+    },
+    "retryError": {
+      "RP_TEAM_RETRY_CONTEXT_CHANGED": "这一轮之后聊天内容、世界状态或团队配置变了，不能再重试。可以直接重新生成这条回复。",
+      "RP_TEAM_RETRY_DISABLED": "团队已关闭，打开后再重试。"
+    },
+    "skip": {
+      "dependency_blocked": "它要等的成员没有完成，所以没有运行",
+      "aborted_by_failure": "其他成员失败后，这一轮提前结束",
+      "preserved": "沿用上一次的结果"
+    },
+    "endedBeforeSchedule": "这一轮在轮到它之前就结束了",
+    "membersUnavailable": "读取不到这一轮的成员记录。",
+    "reload": "重新加载",
+    "openChatFirst": "请先打开这个聊天，再查看轨迹。",
+    "retryNotAccepted": "宿主没有接受这次重试请求。",
+    "notReached": "未轮到"
+  },
+  "settings": {
+    "basics": "基本信息"
+  },
+  "presets": {
+    "current": "当前聊天的预设",
+    "saveAs": "存入前改名称或版本",
+    "replace": "换一个预设",
+    "replaceHelp": "从文件或示例载入会替换当前草稿，保存后才对聊天生效。",
+    "libraryHelp": "预设保存在本机，每个版本保留原样。载入只替换草稿，不会直接改动聊天。",
+    "libraryEmpty": "预设库还是空的。可以把当前草稿存进来，或从文件导入。",
+    "versions": "{n} 个版本",
+    "differences": "{n} 处不同",
+    "same": "与草稿一致",
+    "exportComponent": "导出部分成员为组件"
+  },
+  "prompt": {
+    "outline": "提示词大纲",
+    "focus": "专注编辑",
+    "exitFocus": "退出专注",
+    "params": "用到的参数：",
+    "unknownParam": "未定义：{id}"
+  },
+  "check": {
+    "usesDraft": "按当前草稿检查，包含未保存的修改。",
+    "usesSaved": "按已保存的配置检查。",
+    "result": "检查结果",
+    "resultTurn": "第 {n} 轮的检查结果",
+    "willRun": "{total} 名成员中 {n} 名会运行",
+    "problems": "{n} 个问题",
+    "staleUnknown": "读取不到当前聊天资料的版本，无法判断这次检查是否已经过期。"
+  },
+  "trialNav": {
+    "check": "检查配置",
+    "trial": "试演",
+    "checkNote": "不调用模型",
+    "trialNote": "调用真实模型"
+  },
+  "trialStatus": {
+    "queued": "排队中",
+    "preparing": "准备中",
+    "running": "运行中",
+    "working": "运行中",
+    "cancelling": "正在停止",
+    "complete": "已完成",
+    "completed": "已完成",
+    "committed": "已提交",
+    "passed": "通过",
+    "failed": "失败",
+    "interrupted": "已中断",
+    "cancelled": "已取消",
+    "needs_confirmation": "等待确认"
+  },
+  "stateView": {
+    "fields": "{n} 个字段",
+    "values": "状态值",
+    "count": "{n} 项",
+    "noCheckpoints": "还没有可回看的状态记录。"
+  },
+  "colon": "："
 }

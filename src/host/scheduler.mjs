@@ -11,6 +11,8 @@ export function createScheduler({
   const agents = new Map(config.agents.map(agent => [agent.id, agent]))
   const { concurrency, maxActivations, maxPerAgent, maxDepth } = config.execution
   const manual = new Set(manualAgentIds)
+  // Members whose finished work a retry reuses: conditions and events must not start them a second time.
+  const preserved = new Set(skipAgentIds.filter(id => !forceAgentIds.includes(id)))
   const states = new Map(config.agents.map(agent => [agent.id, {
     agentId: agent.id, status: 'pending', activations: 0, running: false, completed: 0, error: null
   }]))
@@ -147,6 +149,7 @@ export function createScheduler({
       }
     }
     for (const [agentId, reason] of matched) {
+      if (preserved.has(agentId)) { trace('activation.preserved', agentId, { reason: 'preserved' }); continue }
       const state = states.get(agentId)
       if (state.activations === 0 && (!state.status || state.status === 'pending' || state.status === 'queued')) {
         mergeInitialReason(agentId, reason)
@@ -192,7 +195,11 @@ export function createScheduler({
         reason.triggerMatches.push(value)
         matched.set(value.agentId, reason)
       }
-      for (const [agentId, reason] of matched) mergeInitialReason(agentId, reason)
+      for (const [agentId, reason] of matched) {
+        // A retry reuses this member's finished work; matching the same input again must not run it twice.
+        if (preserved.has(agentId)) { trace('activation.preserved', agentId, { reason: 'preserved' }); continue }
+        mergeInitialReason(agentId, reason)
+      }
     }
     await evaluateConditions()
   }
@@ -220,6 +227,7 @@ export function createScheduler({
       grouped.set(match.agentId, values)
     }
     for (const [agentId, triggerMatches] of grouped) {
+      if (preserved.has(agentId)) { trace('activation.preserved', agentId, { reason: 'preserved' }); continue }
       const reason = { type: reasonType, triggers: triggerReason(triggerMatches), triggerMatches }
       const activeActivation = slotsByAgent.get(agentId)?.activation
       const queuedActivation = queue.find(item => item.agentId === agentId)

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { activeUserInputIds, isAppendedSurfaceEvent, readSessionEvents } from './session-event-policy.mjs'
+import { triggerIdentity } from './event-triggers.mjs'
 import { MANAGED_CAPABILITIES, TRUSTED_CAPABILITIES, capabilityLabel } from './native-policy.mjs'
 import { describeStateToolAccess, projectStateValueForAgent } from './state-store.mjs'
 import { missingContextSelections } from './context-policy.mjs'
@@ -18,7 +20,7 @@ const SOURCE_ORDER = Object.freeze(Object.keys(SOURCE_LABELS))
 const DYNAMIC_CONTEXT_SOURCES = new Set(['agent_messages', 'drafts'])
 
 /** Author-facing read-only preview and persistent library API. */
-export function createAuthorToolsApi({ ctx, store, stateStore, getOptions, readState, presetLibrary } = {}) {
+export function createAuthorToolsApi({ ctx, store, stateStore, getOptions, readState, presetLibrary, readCooldownMarkers } = {}) {
   let library = presetLibrary ?? null
   const getLibrary = () => {
     if (!library) library = new PresetLibrary(presetLibraryPath(store, ctx))
@@ -58,10 +60,14 @@ export function createAuthorToolsApi({ ctx, store, stateStore, getOptions, readS
       if (unknownManualIds.length) issues.push({ code: 'unknown-manual-agent', severity: 'warning', agentIds: unknownManualIds })
 
       let initialState = null
+      // The version hashes the state exactly as getContextCatalog reads it, even when that state cannot be projected,
+      // so a preview taken against the current sources is not reported as stale.
+      let versionState = null
       let stateBusy = false
       if (typeof readState === 'function') {
         try {
           initialState = await readState({ conversationId: id })
+          versionState = initialState
           if (!initialState || !Array.isArray(initialState.values)) initialState = null
           else {
             stateBusy = initialState.busy === true
@@ -82,8 +88,10 @@ export function createAuthorToolsApi({ ctx, store, stateStore, getOptions, readS
       }
       const previewBusy = snapshot.busy === true || stateBusy
       const previewSnapshot = previewBusy === (snapshot.busy === true) ? snapshot : { ...snapshot, busy: true }
+      const cooldownMarkers = typeof readCooldownMarkers === 'function'
+        ? readCooldownMarkers(id, snapshot.activeInputMessageIds ?? []) : undefined
       const members = normalized.agents.map(agent => previewMember({
-        agent, config: normalized, snapshot: previewSnapshot, initialState, inputText,
+        agent, config: normalized, snapshot: previewSnapshot, initialState, inputText, cooldownMarkers,
         manualAgentIds: new Set(manualAgentIds.filter(agentId => knownIds.has(agentId)))
       }))
       if (previewBusy) {
@@ -92,8 +100,9 @@ export function createAuthorToolsApi({ ctx, store, stateStore, getOptions, readS
       return {
         configHash: sha256(stableJson(normalized)),
         parameterResolution: { values: resolved.values, changes: resolved.changes, sourceHash: resolved.sourceHash, resolvedHash: resolved.resolvedHash },
-        sourceVersion: sourceVersion(snapshot, initialState),
+        sourceVersion: sourceVersion(snapshot, versionState),
         anchor: snapshot.anchor ?? null,
+        ...(Number.isSafeInteger(snapshot.userTurnOrdinal) ? { nextUserTurn: snapshot.userTurnOrdinal + 1 } : {}),
         members,
         issues
       }
@@ -116,9 +125,11 @@ export function createAuthorToolsApi({ ctx, store, stateStore, getOptions, readS
   return Object.freeze(api)
 }
 
-function previewMember({ agent, config, snapshot, initialState, inputText, manualAgentIds }) {
+function previewMember({ agent, config, snapshot, initialState, inputText, manualAgentIds, cooldownMarkers }) {
   const dynamic = []
   const reasons = []
+  // Structured counterpart of `reasons`, so a client can explain each trigger in its own language.
+  const triggerChecks = []
   const issues = []
   const stateNamespaces = projectAgentState(agent, config.state.definitions, initialState)
   const sources = projectAvailableSources(snapshot.context, {
@@ -137,26 +148,44 @@ function previewMember({ agent, config, snapshot, initialState, inputText, manua
   }
 
   let triggered = false
-  for (const trigger of agent.triggers) {
+  const nextOrdinal = Number.isSafeInteger(snapshot.userTurnOrdinal) ? snapshot.userTurnOrdinal + 1 : undefined
+  for (const [index, trigger] of agent.triggers.entries()) {
+    // Same rule as the runtime tracker: a trigger that started on turn M stays quiet while next - M <= cooldownTurns.
+    if (trigger.cooldownTurns && cooldownMarkers && nextOrdinal !== undefined) {
+      const identity = triggerIdentity(config.id, agent.id, trigger, index)
+      const last = cooldownMarkers.filter(marker => marker?.triggerId === identity && Number.isSafeInteger(marker.userTurnOrdinal))
+        .reduce((latest, marker) => Math.max(latest, marker.userTurnOrdinal), -Infinity)
+      if (Number.isFinite(last) && nextOrdinal - last <= trigger.cooldownTurns) {
+        const availableAt = last + trigger.cooldownTurns + 1
+        reasons.push(`Trigger is cooling down until user turn ${availableAt}.`)
+        triggerChecks.push({ type: trigger.type, outcome: 'cooldown', availableAt })
+        continue
+      }
+    }
     if (trigger.type === 'always') {
       triggered = true
       reasons.push('Always trigger is enabled.')
+      triggerChecks.push({ type: 'always', outcome: 'run' })
     } else if (trigger.type === 'manual') {
       if (manualAgentIds.has(agent.id)) {
         triggered = true
         reasons.push('Agent is included in manualAgentIds.')
       } else reasons.push('Manual trigger is not selected.')
+      triggerChecks.push({ type: 'manual', outcome: manualAgentIds.has(agent.id) ? 'run' : 'skip' })
     } else if (trigger.type === 'requested_by_agent') {
       dynamic.push('Incoming agent requests are not available before a run starts.')
       reasons.push('Waiting for a configured incoming agent request.')
+      triggerChecks.push({ type: 'requested_by_agent', outcome: 'on_request', from: [...(trigger.from ?? [])] })
     } else if (trigger.type === 'condition') {
       if (initialState === null) {
         dynamic.push('Condition trigger cannot be evaluated because the initial state snapshot is unavailable.')
         reasons.push('Initial condition is unknown.')
+        triggerChecks.push({ type: 'condition', outcome: 'unknown' })
       } else {
         const matches = evaluateCondition(stateNamespaces, trigger.condition)
         triggered ||= matches
         reasons.push(matches ? 'Initial state condition matches.' : 'Initial state condition does not match.')
+        triggerChecks.push({ type: 'condition', outcome: matches ? 'run' : 'skip' })
         dynamic.push('Condition result can change if an earlier agent edits state before this agent activates.')
       }
     } else if (trigger.type === 'keyword') {
@@ -166,17 +195,23 @@ function previewMember({ agent, config, snapshot, initialState, inputText, manua
       const matches = typeof text === 'string' && trigger.keywords[trigger.match === 'all' ? 'every' : 'some'](word => normalize(text).includes(normalize(word)))
       triggered ||= matches
       reasons.push(matches ? 'Visible input keywords match.' : 'Visible input keywords do not match.')
+      triggerChecks.push({ type: 'keyword', outcome: matches ? 'run' : 'skip' })
     } else if (trigger.type === 'periodic') {
       if (Number.isSafeInteger(snapshot.userTurnOrdinal)) {
         const ordinal = snapshot.userTurnOrdinal + 1, offset = trigger.offset || 0
         const matches = ordinal >= offset && (ordinal - offset) % trigger.every === 0
         triggered ||= matches
         reasons.push(`Next active-branch user turn ${ordinal}: ${matches ? 'periodic trigger matches' : 'periodic trigger does not match'}.`)
-      } else dynamic.push('User turn ordinal is unavailable; periodic trigger cannot be predicted.')
+        triggerChecks.push({ type: 'periodic', outcome: matches ? 'run' : 'skip', every: trigger.every, offset, ordinal })
+      } else {
+        dynamic.push('User turn ordinal is unavailable; periodic trigger cannot be predicted.')
+        triggerChecks.push({ type: 'periodic', outcome: 'unknown', every: trigger.every, offset: trigger.offset || 0 })
+      }
     } else if (trigger.type === 'state_changed' || trigger.type === 'message_received') {
       dynamic.push('This event is evaluated from authorized changes/messages during an explicit run; the preview does not invent events.')
+      triggerChecks.push({ type: trigger.type, outcome: 'on_event' })
     }
-    if (trigger.cooldownTurns) dynamic.push('Committed cooldown markers are checked at run start; this static preview does not override them.')
+    if (trigger.cooldownTurns && !cooldownMarkers) dynamic.push('Committed cooldown markers are checked at run start; this static preview does not override them.')
   }
 
   const permissions = previewPermissions(agent, config)
@@ -201,6 +236,7 @@ function previewMember({ agent, config, snapshot, initialState, inputText, manua
     name: agent.name,
     triggered,
     reasons,
+    triggerChecks,
     context: projection.sources,
     missingSelections,
     permissions,
@@ -331,15 +367,84 @@ function sourceVersion(snapshot, state) {
 }
 
 async function readAuthorSnapshot(ctx, conversationId) {
-  const service = ctx?.eleckoiStoryState
-  if (!service || typeof service.authorSnapshot !== 'function') {
-    throw teamError('RP_TEAM_AUTHORING_UNAVAILABLE', 'Roleplay author snapshot service is unavailable')
+  const conversations = ctx?.eleckoiConversationsApi
+  if (!conversations?.details || !conversations?.authorState || !ctx?.sessionQuery?.observeSession) {
+    throw teamError('RP_TEAM_AUTHORING_UNAVAILABLE', 'Official Conversations and Session APIs are required for author previews')
   }
-  const snapshot = await service.authorSnapshot({ conversationId })
-  if (!snapshot || !isRecord(snapshot.context)) {
-    throw teamError('RP_TEAM_AUTHORING_SNAPSHOT_INVALID', 'Roleplay author snapshot is unavailable for this conversation')
+  const [details, authorState] = await Promise.all([
+    conversations.details(conversationId), conversations.authorState(conversationId)
+  ])
+  const runtimeSessionId = String(details.runtimeSessionId ?? '')
+  const events = runtimeSessionId ? await readSessionEvents(ctx, runtimeSessionId) : []
+  const messages = events.flatMap(event => {
+    if (!['user/message', 'assistant/message'].includes(event?.type) || !isAppendedSurfaceEvent(event)) return []
+    const source = eventMessage(event)
+    if (!source) return []
+    const role = event.type === 'user/message' ? 'user' : 'assistant'
+    if (role === 'user' && source.source?.kind !== 'user') return []
+    return [{ role, content: messageText(source), ...(Array.isArray(source.attachments) ? { attachments: structuredClone(source.attachments) } : {}) }]
+  })
+  const lastUserIndex = messages.findLastIndex(item => item.role === 'user')
+  const metadata = details.metadata ?? details.conversation?.metadata ?? {}
+  const variables = parseJsonObject(authorState.currentVariableStateJson)
+  // Members read and write the raw (editable) setting text, as the runtime does; prompts still show the expanded library.
+  const settingLibrary = authorState.settingLibrary ?? { groups: [], entries: [] }
+  const editableLibrary = authorState.editableSettingLibrary ?? settingLibrary
+  const world = { variables, settings: Object.fromEntries((editableLibrary.entries ?? []).map(entry => [entry.id, entry.content ?? ''])) }
+  const context = {
+    characterId: metadata.characterId ?? '', characterName: metadata.characterName ?? '',
+    persona: metadata.characterPersona ?? {},
+    history: messages.filter((_item, index) => index !== lastUserIndex),
+    currentUserInput: lastUserIndex < 0 ? '' : messages[lastUserIndex].content,
+    settingLibrary
   }
-  return snapshot
+  return {
+    context, world, anchor: latestSessionAnchor(runtimeSessionId, events), busy: false,
+    userTurnOrdinal: messages.filter(item => item.role === 'user').length,
+    activeInputMessageIds: activeUserInputIds(events),
+    baseHash: sha256(stableJson({ context, world }))
+  }
+}
+
+function latestSessionAnchor(sessionId, events) {
+  if (!sessionId) return null
+  const endIndexes = events.map((event, index) => event?.type === 'turn/end' ? index : -1).filter(index => index >= 0)
+  const endIndex = endIndexes.at(-1)
+  if (endIndex === undefined) return null
+  const end = events[endIndex]
+  const turn = (end.data ?? end).turn
+  if (!Number.isSafeInteger(turn)) return null
+  const previousEnd = endIndexes.at(-2) ?? -1
+  const turnEvents = events.slice(previousEnd + 1, endIndex + 1)
+  const input = turnEvents.find(event => event.type === 'user/message' && eventMessage(event)?.source?.kind === 'user')
+  const output = [...turnEvents].reverse().find(event => event.type === 'assistant/message' && ((event.data ?? event).turn === undefined || (event.data ?? event).turn === turn))
+  const inputMessage = input ? eventMessage(input) : undefined
+  const outputMessage = output ? eventMessage(output) : undefined
+  return {
+    sessionId, turn,
+    ...(inputMessage?.id ? { inputMessageId: inputMessage.id } : {}),
+    ...(Number.isSafeInteger(input?.seq) ? { inputEventSeq: input.seq } : {}),
+    ...(outputMessage?.id ? { assistantMessageId: outputMessage.id } : {}),
+    ...(Number.isSafeInteger(output?.seq) ? { assistantSeq: output.seq } : {})
+  }
+}
+
+function eventMessage(event) {
+  const data = event?.data ?? event
+  return event?.type === 'user/message' ? data.message ?? data : data.message ?? data.item
+}
+
+function messageText(message) {
+  if (typeof message.content === 'string') return message.content
+  if (!Array.isArray(message.content)) return ''
+  return message.content.filter(item => item && typeof item.text === 'string').map(item => item.text).join('')
+}
+
+function parseJsonObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return structuredClone(value)
+  if (typeof value !== 'string') return {}
+  const parsed = JSON.parse(value)
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
 }
 
 function requireConversationId(value) {

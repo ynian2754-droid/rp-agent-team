@@ -15,7 +15,12 @@ async function bootstrap() {
   let registration
   window.__ModuleLoader__ = { load(value) { registration = value } }
   new Function(__RP_TEAM_BUNDLE__)()
-  const plugin = registration.factory(name => { if (name === 'react') return React; throw new Error(`Unexpected module: ${name}`) })
+  const plugin = registration.factory(name => {
+    if (name === 'react') return React
+    if (name === '@eleckoi/dsh-client-conversations') return {loadTrajectoryComponents: async () => ({})}
+    if (name === '@deepseek-ai/dsh-client-ui-conversation') return {}
+    throw new Error(`Unexpected module: ${name}`)
+  })
 
   const conversations = initialConversations()
   const listeners = new Set()
@@ -23,16 +28,16 @@ async function bootstrap() {
   const calls = []
   const runs = {}
   const state = {
-    conversationId: query.get('c') === '2' ? 'preview-c-2' : 'preview-c-1',
+    conversationId: ['2', '3'].includes(query.get('c')) ? `preview-c-${query.get('c')}` : 'preview-c-1',
     open: Boolean(query.get('page')), mounted: Boolean(query.get('page')), files: false, revision: 1,
     params: query.get('page') ? { page: query.get('page'), runId: '' } : {},
-    width: query.get('w') || 'normal', rejectRetry: false
+    width: query.get('w') || 'normal', rejectRetry: false, ledger: null
   }
   const notify = () => { for (const listener of [...listeners]) listener() }
   const subscribe = listener => { listeners.add(listener); return () => listeners.delete(listener) }
   const setScenario = (conversationId, scenario) => {
-    const config = conversations[conversationId].config
-    runs[conversationId] = { scenario, live: scenarioRun(conversationId, config, scenario), history: historicalRuns(conversationId, config) }
+    const { config, turn } = conversations[conversationId]
+    runs[conversationId] = { scenario, live: scenarioRun(conversationId, config, scenario, undefined, turn), history: historicalRuns(conversationId, config, turn) }
   }
   for (const id of Object.keys(conversations)) setScenario(id, query.get('run') || 'none')
   const liveRun = id => runs[id].live?.run || null
@@ -45,16 +50,23 @@ async function bootstrap() {
     saveConfig(p) {
       const current = conversations[p.conversationId]
       if (p.expectedRevision !== current.revision) throw Object.assign(new Error(`Configuration revision is ${current.revision}, not ${p.expectedRevision}`), { code: 'RP_TEAM_CONFIG_CONFLICT' })
+      // ?fail=enable reproduces a host that refuses to switch the team (for example a member model without an adapter).
+      if (query.get('fail') === 'enable' && p.enabled !== current.enabled) throw new Error('no adapter registered for provider "rp-team-v050-local"')
       Object.assign(current, { enabled: p.enabled, revision: current.revision + 1, config: structuredClone(p.config), parameterValues: structuredClone(p.parameterValues || current.parameterValues || {}) })
       return structuredClone({ conversationId: p.conversationId, enabled: current.enabled, revision: current.revision, config: current.config, parameterValues: current.parameterValues })
     },
     getOptions: p => ({ conversationId: p.conversationId, ...structuredClone(OPTIONS) }),
-    getStatus: p => ({ conversationId: p.conversationId, binding: null, run: structuredClone(liveRun(p.conversationId)), manualAgentIds: conversations[p.conversationId].manualAgentIds }),
-    listTraces: p => allRuns(p.conversationId).map(({ run }) => ({ runId: run.runId, phase: run.phase, startedAt: run.startedAt, productMessageId: run.productMessageId, assistantMessageId: run.assistantMessageId, outputAgentId: run.outputAgentId })),
+    getStatus(p) {
+      const run = structuredClone(liveRun(p.conversationId))
+      // ?fail=retry: the host reports that the config changed since this round, so retry is withheld.
+      if (query.get('fail') === 'retry' && run?.retryAvailable) Object.assign(run, { retryAvailable: false, retryBlockedReason: 'config_changed' })
+      return { conversationId: p.conversationId, binding: null, run, manualAgentIds: conversations[p.conversationId].manualAgentIds }
+    },
+    listTraces: p => allRuns(p.conversationId).map(({ run }) => ({ runId: run.runId, phase: run.phase, turn: run.turn, startedAt: run.startedAt, productMessageId: run.productMessageId, assistantMessageId: run.assistantMessageId, outputAgentId: run.outputAgentId })),
     getTrace(p) {
       const found = allRuns(p.conversationId).find(item => item.run.runId === p.runId)
       if (!found) throw Object.assign(new Error(`Unknown RP Team run ${p.runId}`), { code: 'RP_TEAM_RUN_NOT_FOUND' })
-      return structuredClone({ ...found.run, events: found.events })
+      return structuredClone({ ...found.run, events: found.events, configuration: found.configuration, executionSessions: found.executionSessions })
     },
     setManualAgents(p) { conversations[p.conversationId].manualAgentIds = p.agentIds; return { conversationId: p.conversationId, manualAgentIds: p.agentIds } },
     exportConfig: p => ({ format: 'rp-team-preset-v2', dependencies: { presets: [], models: [], toolGroups: [] }, config: structuredClone(conversations[p.conversationId].config) }),
@@ -85,9 +97,9 @@ async function bootstrap() {
     async regenerate(payload) {
       calls.push({ method: 'regenerate', payload })
       if (state.rejectRetry) throw new Error('Product run admission rejected (fixture)')
-      const config = conversations[payload.conversationId].config
+      const { config, turn } = conversations[payload.conversationId]
       runs[payload.conversationId].history.push(runs[payload.conversationId].live)
-      runs[payload.conversationId].live = scenarioRun(payload.conversationId, config, 'working', `${payload.conversationId}-run-retry-${calls.length}`)
+      runs[payload.conversationId].live = scenarioRun(payload.conversationId, config, 'working', `${payload.conversationId}-run-retry-${calls.length}`, turn)
       runs[payload.conversationId].live.run.retrySourceRunId = payload.requestId
       runs[payload.conversationId].scenario = 'working'
       notify()
@@ -97,7 +109,6 @@ async function bootstrap() {
   const ctx = {
     remote: { rpTeam, async $mount() { return async () => {} } },
     eleckoiConversations,
-    eleckoiTrajectory: { registerSource(source) { state.trajectorySource = source; return () => { delete state.trajectorySource } } },
     sidebarRight: {
       openTabIn(sessionId, kind, options) {
         if (sessionId !== `s-${state.conversationId}` || kind !== 'rp-team') throw new Error('Wrong workspace target')
@@ -107,7 +118,10 @@ async function bootstrap() {
     },
     sidebarRightTabs: { register: () => () => {} },
     effect(mount) { mount() }, inject(_services, mount) { mount(ctx); return { async dispose() {} } },
-    slots: { inject(_name, mount) { return mount() }, register(options, component) { slots.set(options.name, component); return () => slots.delete(options.name) } }
+    slots: {
+      entriesOfSlot(name) { return [{registrant:'preview-official-seat',options:{priority:100},component:()=>null,inject:()=>({})}] },
+      inject(_name, mount) { return mount() }, register(options, component) { slots.set(options.name, component); return () => slots.delete(options.name) }
+    }
   }
   await plugin.apply(ctx)
 
@@ -117,6 +131,13 @@ async function bootstrap() {
   }
   const sessionStatus = sessionId => new Map([[sessionId, { running: ['working', 'awaiting_commit'].includes(runs[state.conversationId].scenario) }]])
 
+  // Stands in for the official view switcher that the plugin's session body receives.
+  const openView = (view, selector) => {
+    state.ledger = { view, selector, at: Date.now() }
+    calls.push({ method: 'openView', payload: { view, selector } })
+    notify()
+  }
+
   function Toolbar() {
     const id = state.conversationId
     const button = (label, action, pressed) => <button type="button" aria-pressed={pressed} onClick={() => { action(); notify() }}>{label}</button>
@@ -124,6 +145,7 @@ async function bootstrap() {
       <span>夹具</span>
       {button('聊天 A', () => { state.conversationId = 'preview-c-1' }, id === 'preview-c-1')}
       {button('聊天 B', () => { state.conversationId = 'preview-c-2' }, id === 'preview-c-2')}
+      {button('聊天 C', () => { state.conversationId = 'preview-c-3' }, id === 'preview-c-3')}
       <span className="fixture-sep" />
       {SCENARIOS.map(scenario => <React.Fragment key={scenario}>{button(SCENARIO_LABELS[scenario], () => setScenario(id, scenario), runs[id].scenario === scenario)}</React.Fragment>)}
       <span className="fixture-sep" />
@@ -135,19 +157,23 @@ async function bootstrap() {
   }
 
   function Preview() {
-    React.useSyncExternalStore(subscribe, () => `${state.conversationId}:${state.open}:${state.mounted}:${state.revision}:${state.files}:${state.width}:${state.rejectRetry}:${runs[state.conversationId].scenario}:${document.documentElement.dataset.theme}`)
+    React.useSyncExternalStore(subscribe, () => `${state.conversationId}:${state.open}:${state.mounted}:${state.revision}:${state.files}:${state.width}:${state.rejectRetry}:${runs[state.conversationId].scenario}:${document.documentElement.dataset.theme}:${state.ledger?.at}`)
     const [draft, setDraft] = React.useState('雨还没有停。')
     const Toggle = slots.get('eleckoi.roleplay.conversation.input.left')
     const Status = slots.get('eleckoi.roleplay.conversation.composer.dock')
     const After = slots.get('eleckoi.roleplay.message.after')
     const Workspace = slots.get('sidebar.right.pane.tab')
+    const Body = slots.get('eleckoi.roleplay.session.body')
     const sessionId = `s-${state.conversationId}`
     const owner = { sessionId, useSessionStatus: select => select(sessionStatus(sessionId)), useTabInfo }
     const config = conversations[state.conversationId].config
     return <main className={`fixture width-${state.width} ${state.open ? '' : 'closed'}`}>
       <Toolbar />
       <article className="fixture-chat">
-        <header><small>RP Team · 离线 UI 夹具 · 不调用模型</small><h1>{state.conversationId === 'preview-c-1' ? '那封尚未拆开的信' : '雨夜的门'}</h1></header>
+        <header><small>RP Team · 离线 UI 夹具 · 不调用模型</small><h1>{{ 'preview-c-1': '那封尚未拆开的信', 'preview-c-2': '雨夜的门', 'preview-c-3': '周四晚上' }[state.conversationId]}</h1></header>
+        {Body ? <Body sessionId={sessionId} openView={openView} /> : null}
+        {state.ledger ? <div className="fixture-ledger" role="status">官方轨迹视图（夹具占位）已收到跳转：<code>{state.ledger.view} · {state.ledger.selector}</code>
+          <button type="button" onClick={() => { state.ledger = null; notify() }}>返回聊天</button></div> : null}
         <div className="fixture-messages">
           <div className="fixture-message is-user">门外有人敲了三下。</div>
           <div className="fixture-message is-assistant">她把手停在柜门上，仍然相信那封信就藏在里面。

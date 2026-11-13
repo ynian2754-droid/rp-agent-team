@@ -5,23 +5,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createTrialApi } from '../src/host/trials.mjs'
 import { defaultTeamConfig } from '../src/shared/schema.mjs'
+import { writeDurableTrialCheckpoint } from '../src/host/trial-storage.mjs'
+import { createTrialPublicHost } from './fixtures/trial-public-host.mjs'
 
 test('trajectory lookup returns all prior native runs and scopes projection to trial turns', async () => {
   const home = mkdtempSync(join(tmpdir(), 'rp-team-trial-trajectory-'))
   const workers = []
   const config = defaultTeamConfig()
   const teamState = { revision: 0, namespaces: {}, pathVersions: {} }
-  const privateSnapshot = {
-    format: 'eleckoi.rp-team-trial-snapshot', version: 1,
-    conversationId: 'source-chat', createdAt: '2026-10-04T00:00:00Z', archive: {}, character: {},
-  }
+  const { ctx } = createTrialPublicHost()
+  let snapshot
   const api = createTrialApi({
-    ctx: { eleckoiTrialSnapshots: {
-      freeze: async () => ({ privateSnapshot, createdAt: privateSnapshot.createdAt, summary: {} }),
-      getHostRoot: () => home,
-      captureModelProviders: async () => [],
-      captureAgentPresets: async () => [],
-    } },
+    ctx,
     store: { path: join(home, 'config.json'), get: () => ({ config, enabled: true }) },
     stateStore: { committedSnapshot: () => teamState },
     workerFactory: plan => {
@@ -45,6 +40,7 @@ test('trajectory lookup returns all prior native runs and scopes projection to t
     })
     for (let count = 0; count < 30 && workers.length === 0; count += 1) await new Promise(resolve => setImmediate(resolve))
     assert.equal(workers.length, 1)
+    snapshot = workers[0].plan.snapshot
     const progress = workers[0].plan.onProgress
     const rootEvents = [
       { seq: 3, type: 'turn/start', data: { turn: 1 } },
@@ -57,11 +53,18 @@ test('trajectory lookup returns all prior native runs and scopes projection to t
       runId, association: { sessionId: `child-${turn}`, agentId: 'A' },
       events: [{ seq: turn, type: 'assistant/message', data: { turn } }],
     })
-    const emitTurn = (turn, afterSeq, events) => progress({ type: 'turn:completed', variantId: 'A',
-      turn: { turn, runId: `run-${turn}`, sessionId: 'root-session', conversationId: 'native-chat', afterSeq,
-        nativeEvents: events, trajectory: { run: run(`run-${turn}`, turn), executions: [execution(`run-${turn}`, turn)] } },
-      checkpoint: { ...privateSnapshot, teamState },
-    })
+    const emitTurn = (turn, afterSeq, events) => {
+      const commitReceipt = { outcome: 'committed', conversationId: 'native-chat', sessionId: 'root-session', runId: `run-${turn}`, turn, active: true }
+      const durableTurn = { turn, runId: `run-${turn}`, attemptId: `attempt-${turn}`, sessionId: 'root-session', conversationId: 'native-chat', afterSeq,
+        taskUsage: { requests: turn, reportedTokens: 0, elapsedMs: turn }, commitReceipt,
+        nativeEvents: events, trajectory: { run: run(`run-${turn}`, turn), executions: [execution(`run-${turn}`, turn)] } }
+      const checkpoint = { ...snapshot, teamState }
+      writeDurableTrialCheckpoint(workers[0].plan.workerCheckpointRoot, started.trialId, 'A', {
+        format: 'rp-team.trial-worker-checkpoint', version: 1, trialId: started.trialId, variantId: 'A',
+        receipt: commitReceipt, turn: durableTurn, checkpoint,
+      })
+      progress({ type: 'turn:completed', variantId: 'A', turn: { turn, runId: `run-${turn}`, attemptId: `attempt-${turn}` } })
+    }
     emitTurn(1, 2, rootEvents.slice(0, 2))
     emitTurn(2, 4, rootEvents)
 

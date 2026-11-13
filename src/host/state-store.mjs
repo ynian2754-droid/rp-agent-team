@@ -129,20 +129,20 @@ export class StateStore {
       if (segments.length !== 2 || segments[0] !== 'settings' || !segments[1] || typeof nextValue !== 'string') {
         throw teamError('RP_TEAM_STATE_TYPE_MISMATCH', 'World setting writes require one encoded virtual path and string content')
       }
+      // Publication can only replace an existing editable entry; fail now rather than after every member has run.
+      if (typeof getPointer(overlayWrites(run.state, run.writes).world, target.path) !== 'string') {
+        throw teamError('RP_TEAM_STATE_PATH_UNDEFINED', `World setting ${segments[1]} has no editable entry`)
+      }
     }
     const definition = stateDefinition(run.config, target.namespace, target.path)
     if (definition && definition.path === target.path && !matchesType(nextValue, definition.type)) {
       throw teamError('RP_TEAM_STATE_TYPE_MISMATCH', `State value at ${target.namespace}${target.path} must be ${definition.type}`)
     }
-    validateConfiguredState(run.config, overlayWrites(run.state, [
-      ...run.writes, { namespace: target.namespace, path: target.path, value: nextValue }
-    ]))
-    const key = pathKey(target.namespace, target.path)
-    const prior = run.writes.findIndex(item => pathKey(item.namespace, item.path) === key)
-    const baselineExpectedVersion = prior === -1 ? baselineVersion : run.writes[prior].expectedVersion
-    const staged = { namespace: target.namespace, path: target.path, value: nextValue, expectedVersion: baselineExpectedVersion, agentId }
-    if (prior === -1) run.writes.push(staged)
-    else run.writes[prior] = staged
+    const writes = journalWith(run.state, run.writes, {
+      namespace: target.namespace, path: target.path, value: nextValue, expectedVersion: baselineVersion, agentId
+    })
+    validateConfiguredState(run.config, overlayWrites(run.state, writes))
+    run.writes = writes
     run.stagedVersion += 1
     run.stagedPathVersions[pathKey(target.namespace, target.path)] = run.stagedVersion
     setOwn(record.runs, run.runId, run)
@@ -181,12 +181,11 @@ export class StateStore {
     const stagedVersion = versionForPath(run.stagedPathVersions, target.namespace, target.path)
     if (stagedVersion !== expectedVersion) throw stateConflict(target, expectedVersion, stagedVersion)
     const key = pathKey(target.namespace, target.path)
-    const prior = run.writes.findIndex(item => pathKey(item.namespace, item.path) === key)
-    const baselineExpectedVersion = prior === -1 ? baselineVersion : run.writes[prior].expectedVersion
-    const staged = { namespace: target.namespace, path: target.path, operation: 'remove', expectedVersion: baselineExpectedVersion, agentId }
-    validateConfiguredState(run.config, overlayWrites(run.state, [...run.writes, staged]))
-    if (prior === -1) run.writes.push(staged)
-    else run.writes[prior] = staged
+    const writes = journalWith(run.state, run.writes, {
+      namespace: target.namespace, path: target.path, operation: 'remove', expectedVersion: baselineVersion, agentId
+    })
+    validateConfiguredState(run.config, overlayWrites(run.state, writes))
+    run.writes = writes
     run.stagedVersion += 1
     run.stagedPathVersions[key] = run.stagedVersion
     setOwn(record.runs, run.runId, run)
@@ -813,6 +812,20 @@ function arrayIndex(segment, length, allowAppend = false) {
 function decodePointer(pointer) { return pointer.slice(1).split('/').map(segment => segment.replace(/~1/g, '/').replace(/~0/g, '~')) }
 function pointerJoin(pointer, segment) {
   return `${pointer}/${segment.replace(/~/g, '~0').replace(/\//g, '~1')}`
+}
+
+/** Keep earlier operations in place when intervening writes can depend on them, as with array appends. */
+function journalWith(state, writes, staged) {
+  const previous = writes.at(-1)
+  if (previous?.namespace !== staged.namespace || previous.path !== staged.path) return [...writes, staged]
+
+  const prefix = writes.slice(0, -1)
+  if (staged.operation === 'remove') {
+    const before = overlayWrites(state, prefix)[staged.namespace]
+    // A consecutive creation and removal of a new key has no write to commit.
+    if (getPointer(before, staged.path) === undefined) return prefix
+  }
+  return [...prefix, { ...staged, expectedVersion: previous.expectedVersion }]
 }
 
 function overlayWrites(state, writes) {

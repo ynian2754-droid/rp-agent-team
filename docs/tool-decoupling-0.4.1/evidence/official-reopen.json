@@ -1,0 +1,750 @@
+{
+  "hostCommit": "d4b6bb949771693cd357ddd535ead22f4e835774",
+  "dshCommit": "c1b47e41fcd54d20a0f061df28683bfc29ee24e5",
+  "lifecycleRegistrationEvidence": "sample-source-does-not-reference-lifecycle-service",
+  "scenarios": [
+    {
+      "name": "independent-process-reopen",
+      "passed": true,
+      "privateState": {
+        "remembered": "PUBLIC_MEMORY",
+        "expressed": true
+      }
+    }
+  ],
+  "requests": [],
+  "journal": [
+    {
+      "id": "9b18b443-7843-45c5-87af-6ce6a47334f1",
+      "conversationId": "170bd187-207b-4bf6-847d-1aeef426e10e",
+      "rootSessionId": "170bd187-207b-4bf6-847d-1aeef426e10e",
+      "inputMessageId": "05f15c19-3708-45f0-9428-addc2f42a917",
+      "inputText": "PROBE_SUCCESS",
+      "turn": 1,
+      "status": "committed",
+      "members": [
+        {
+          "agentId": "observer",
+          "sessionId": "d7baf631-8aa3-4960-8de9-01c8a0da082d"
+        },
+        {
+          "agentId": "actor",
+          "sessionId": "0356fc97-a1f8-4e91-8647-331bf81f03e2"
+        }
+      ],
+      "results": {
+        "actor": {
+          "summary": "OFFICIAL_TOOL_TEAM_BODY",
+          "privateDelta": {
+            "expressed": true
+          },
+          "productDelta": {}
+        },
+        "observer": {
+          "summary": "SCOPED_OBSERVATION",
+          "privateDelta": {
+            "remembered": "PUBLIC_MEMORY"
+          },
+          "productDelta": {
+            "score": 2
+          }
+        }
+      },
+      "privateDelta": {
+        "remembered": "PUBLIC_MEMORY",
+        "expressed": true
+      },
+      "productDelta": {
+        "score": 2
+      },
+      "memberPolicies": [
+        {
+          "id": "observer",
+          "description": "Restricted observer",
+          "systemPrompt": "Read permitted observations, communicate them, then submit. Do not inspect unrelated files.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "observer"
+          },
+          "variablePaths": [
+            "/score"
+          ],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [
+            "public-setting"
+          ],
+          "sendTo": [
+            "actor"
+          ],
+          "writePrivateKeys": [
+            "remembered"
+          ],
+          "writeVariableKeys": [
+            "score"
+          ]
+        },
+        {
+          "id": "actor",
+          "description": "Subjective actor",
+          "systemPrompt": "Use limited observations, receive the observer’s native message, then submit a short RP candidate.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "actor"
+          },
+          "variablePaths": [],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [],
+          "readPrivate": true,
+          "writePrivateKeys": [
+            "expressed"
+          ]
+        }
+      ],
+      "startedAt": "2026-10-11T01:44:58.736Z",
+      "taskId": "task-1",
+      "outputMessageId": "7469d97d-2208-4196-852d-3ffd23091e61"
+    },
+    {
+      "id": "72c5b6db-2d3a-429b-b822-8d5382941389",
+      "conversationId": "170bd187-207b-4bf6-847d-1aeef426e10e",
+      "rootSessionId": "170bd187-207b-4bf6-847d-1aeef426e10e",
+      "inputMessageId": "6624af0c-ad6b-456d-b9eb-f50621bf95f9",
+      "inputText": "PROBE_SECOND",
+      "turn": 2,
+      "status": "committed",
+      "members": [
+        {
+          "agentId": "observer",
+          "sessionId": "4e271ca1-d063-4a19-b1f9-93454fdd3c3f"
+        },
+        {
+          "agentId": "actor",
+          "sessionId": "2796c743-b050-45b9-8bac-9964ce1df9d6"
+        }
+      ],
+      "results": {
+        "actor": {
+          "summary": "OFFICIAL_TOOL_TEAM_BODY",
+          "privateDelta": {
+            "expressed": true
+          },
+          "productDelta": {}
+        },
+        "observer": {
+          "summary": "SCOPED_OBSERVATION",
+          "privateDelta": {
+            "remembered": "SECOND_MEMORY"
+          },
+          "productDelta": {
+            "score": 2
+          }
+        }
+      },
+      "privateDelta": {
+        "remembered": "SECOND_MEMORY",
+        "expressed": true
+      },
+      "productDelta": {
+        "score": 2
+      },
+      "memberPolicies": [
+        {
+          "id": "observer",
+          "description": "Restricted observer",
+          "systemPrompt": "Read permitted observations, communicate them, then submit. Do not inspect unrelated files.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "observer"
+          },
+          "variablePaths": [
+            "/score"
+          ],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [
+            "public-setting"
+          ],
+          "sendTo": [
+            "actor"
+          ],
+          "writePrivateKeys": [
+            "remembered"
+          ],
+          "writeVariableKeys": [
+            "score"
+          ]
+        },
+        {
+          "id": "actor",
+          "description": "Subjective actor",
+          "systemPrompt": "Use limited observations, receive the observer’s native message, then submit a short RP candidate.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "actor"
+          },
+          "variablePaths": [],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [],
+          "readPrivate": true,
+          "writePrivateKeys": [
+            "expressed"
+          ]
+        }
+      ],
+      "startedAt": "2026-10-11T01:44:59.115Z",
+      "taskId": "task-2",
+      "outputMessageId": "37660987-11dc-40bb-9805-cd127ce8a42e"
+    },
+    {
+      "id": "5288933e-8805-4418-a7b4-b96b23e4404d",
+      "conversationId": "170bd187-207b-4bf6-847d-1aeef426e10e",
+      "rootSessionId": "170bd187-207b-4bf6-847d-1aeef426e10e",
+      "inputMessageId": "05f15c19-3708-45f0-9428-addc2f42a917",
+      "inputText": "PROBE_SUCCESS",
+      "turn": 2,
+      "status": "committed",
+      "members": [
+        {
+          "agentId": "observer",
+          "sessionId": "13cf6dcf-0ad9-406f-93df-1f2121a895e6"
+        },
+        {
+          "agentId": "actor",
+          "sessionId": "2e1d61ba-01b6-4f78-b6f4-0bb032e42e9c"
+        }
+      ],
+      "results": {
+        "actor": {
+          "summary": "OFFICIAL_TOOL_TEAM_BODY",
+          "privateDelta": {
+            "expressed": true
+          },
+          "productDelta": {}
+        },
+        "observer": {
+          "summary": "SCOPED_OBSERVATION",
+          "privateDelta": {
+            "remembered": "PUBLIC_MEMORY"
+          },
+          "productDelta": {
+            "score": 2
+          }
+        }
+      },
+      "privateDelta": {
+        "remembered": "PUBLIC_MEMORY",
+        "expressed": true
+      },
+      "productDelta": {
+        "score": 2
+      },
+      "memberPolicies": [
+        {
+          "id": "observer",
+          "description": "Restricted observer",
+          "systemPrompt": "Read permitted observations, communicate them, then submit. Do not inspect unrelated files.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "observer"
+          },
+          "variablePaths": [
+            "/score"
+          ],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [
+            "public-setting"
+          ],
+          "sendTo": [
+            "actor"
+          ],
+          "writePrivateKeys": [
+            "remembered"
+          ],
+          "writeVariableKeys": [
+            "score"
+          ]
+        },
+        {
+          "id": "actor",
+          "description": "Subjective actor",
+          "systemPrompt": "Use limited observations, receive the observer’s native message, then submit a short RP candidate.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "actor"
+          },
+          "variablePaths": [],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [],
+          "readPrivate": true,
+          "writePrivateKeys": [
+            "expressed"
+          ]
+        }
+      ],
+      "startedAt": "2026-10-11T01:44:59.599Z",
+      "taskId": "task-1",
+      "outputMessageId": "61adf912-139b-41f6-9ff3-e8a4bcf4d93c"
+    },
+    {
+      "id": "98501bff-36be-4d79-95c8-24fcb33f257c",
+      "conversationId": "5cc49212-93d1-4e13-8122-eb5a21c950bf",
+      "rootSessionId": "5cc49212-93d1-4e13-8122-eb5a21c950bf",
+      "inputMessageId": "65f609ef-6636-4b48-8397-f1d39f3ed4b4",
+      "inputText": "PROBE_NESTED",
+      "turn": 1,
+      "status": "committed",
+      "members": [
+        {
+          "agentId": "observer",
+          "sessionId": "62807836-cc6e-4ec3-8628-239bb851843a"
+        },
+        {
+          "agentId": "actor",
+          "sessionId": "69a69cf2-0cc6-448b-abc7-375b15915d57"
+        }
+      ],
+      "results": {
+        "observer": {
+          "summary": "SCOPED_OBSERVATION",
+          "privateDelta": {
+            "remembered": "PUBLIC_MEMORY"
+          },
+          "productDelta": {
+            "score": 2
+          }
+        },
+        "actor": {
+          "summary": "OFFICIAL_TOOL_TEAM_BODY",
+          "privateDelta": {
+            "expressed": true
+          },
+          "productDelta": {}
+        }
+      },
+      "privateDelta": {
+        "remembered": "PUBLIC_MEMORY",
+        "expressed": true
+      },
+      "productDelta": {
+        "score": 2
+      },
+      "memberPolicies": [
+        {
+          "id": "observer",
+          "description": "Restricted observer",
+          "systemPrompt": "Read permitted observations, communicate them, then submit. Do not inspect unrelated files.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "observer"
+          },
+          "variablePaths": [
+            "/score"
+          ],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [
+            "public-setting"
+          ],
+          "sendTo": [
+            "actor"
+          ],
+          "writePrivateKeys": [
+            "remembered"
+          ],
+          "writeVariableKeys": [
+            "score"
+          ]
+        },
+        {
+          "id": "actor",
+          "description": "Subjective actor",
+          "systemPrompt": "Use limited observations, receive the observer’s native message, then submit a short RP candidate.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "actor"
+          },
+          "variablePaths": [],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [],
+          "readPrivate": true,
+          "writePrivateKeys": [
+            "expressed"
+          ]
+        }
+      ],
+      "startedAt": "2026-10-11T01:45:00.183Z",
+      "taskId": "task-1",
+      "outputMessageId": "513709e4-01af-4843-96dc-fa4219b1f244"
+    },
+    {
+      "id": "e654623a-3453-439d-a8de-16a380cbd157",
+      "conversationId": "405e8099-5e91-45b4-b754-eb3a76ebb1b5",
+      "rootSessionId": "405e8099-5e91-45b4-b754-eb3a76ebb1b5",
+      "inputMessageId": "33552396-fd5c-494f-a247-6232ba6c8a9e",
+      "inputText": "PROBE_WRITE_DURING",
+      "turn": 1,
+      "status": "product-save-failed",
+      "members": [
+        {
+          "agentId": "observer",
+          "sessionId": "b54df23b-8bcc-484b-b885-f917d35c6237"
+        },
+        {
+          "agentId": "actor",
+          "sessionId": "e01014a6-9a52-465a-8e32-970c783ee629"
+        }
+      ],
+      "results": {
+        "actor": {
+          "summary": "OFFICIAL_TOOL_TEAM_BODY",
+          "privateDelta": {
+            "expressed": true
+          },
+          "productDelta": {}
+        },
+        "observer": {
+          "summary": "SCOPED_OBSERVATION",
+          "privateDelta": {
+            "remembered": "PUBLIC_MEMORY"
+          },
+          "productDelta": {
+            "score": 2
+          }
+        }
+      },
+      "privateDelta": {
+        "remembered": "PUBLIC_MEMORY",
+        "expressed": true
+      },
+      "productDelta": {
+        "score": 2
+      },
+      "memberPolicies": [
+        {
+          "id": "observer",
+          "description": "Restricted observer",
+          "systemPrompt": "Read permitted observations, communicate them, then submit. Do not inspect unrelated files.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "observer"
+          },
+          "variablePaths": [
+            "/score"
+          ],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [
+            "public-setting"
+          ],
+          "sendTo": [
+            "actor"
+          ],
+          "writePrivateKeys": [
+            "remembered"
+          ],
+          "writeVariableKeys": [
+            "score"
+          ]
+        },
+        {
+          "id": "actor",
+          "description": "Subjective actor",
+          "systemPrompt": "Use limited observations, receive the observer’s native message, then submit a short RP candidate.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "actor"
+          },
+          "variablePaths": [],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [],
+          "readPrivate": true,
+          "writePrivateKeys": [
+            "expressed"
+          ]
+        }
+      ],
+      "startedAt": "2026-10-11T01:45:00.784Z",
+      "taskId": "task-1",
+      "productWrite": "{\n  \"score\": 2,\n  \"hidden\": \"HIDDEN_WORLD_SECRET\"\n}",
+      "outputMessageId": "d6644bfc-5a22-44a3-944f-9b5bbbdfdfbb",
+      "error": "Error: 生成期间聊天变量已被其他操作修改，未覆盖当前变量。"
+    },
+    {
+      "id": "b0e55449-ce39-4fb6-9158-75189e7f094b",
+      "conversationId": "13f9a4e8-14cd-4af2-8ff2-2251df295c4f",
+      "rootSessionId": "13f9a4e8-14cd-4af2-8ff2-2251df295c4f",
+      "inputMessageId": "d6cf37c7-0536-4b3f-aaed-4b925ca8310b",
+      "inputText": "PROBE_AFTER_SAVE",
+      "turn": 1,
+      "status": "committed",
+      "members": [
+        {
+          "agentId": "observer",
+          "sessionId": "1750c152-eedc-476d-8bef-49ac00279907"
+        },
+        {
+          "agentId": "actor",
+          "sessionId": "3a0d7343-20e1-4f2e-853e-468edc470bd4"
+        }
+      ],
+      "results": {
+        "actor": {
+          "summary": "OFFICIAL_TOOL_TEAM_BODY",
+          "privateDelta": {
+            "expressed": true
+          },
+          "productDelta": {}
+        },
+        "observer": {
+          "summary": "SCOPED_OBSERVATION",
+          "privateDelta": {
+            "remembered": "PUBLIC_MEMORY"
+          },
+          "productDelta": {
+            "score": 2
+          }
+        }
+      },
+      "privateDelta": {
+        "remembered": "PUBLIC_MEMORY",
+        "expressed": true
+      },
+      "productDelta": {
+        "score": 2
+      },
+      "memberPolicies": [
+        {
+          "id": "observer",
+          "description": "Restricted observer",
+          "systemPrompt": "Read permitted observations, communicate them, then submit. Do not inspect unrelated files.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "observer"
+          },
+          "variablePaths": [
+            "/score"
+          ],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [
+            "public-setting"
+          ],
+          "sendTo": [
+            "actor"
+          ],
+          "writePrivateKeys": [
+            "remembered"
+          ],
+          "writeVariableKeys": [
+            "score"
+          ]
+        },
+        {
+          "id": "actor",
+          "description": "Subjective actor",
+          "systemPrompt": "Use limited observations, receive the observer’s native message, then submit a short RP candidate.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "actor"
+          },
+          "variablePaths": [],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [],
+          "readPrivate": true,
+          "writePrivateKeys": [
+            "expressed"
+          ]
+        }
+      ],
+      "startedAt": "2026-10-11T01:45:01.335Z",
+      "taskId": "task-1",
+      "outputMessageId": "d5c744b3-2ffd-4dde-8058-6c33d7cd7897"
+    },
+    {
+      "id": "f3d4554f-71df-4c44-8caa-cad74e8d1a96",
+      "conversationId": "403c4b95-bf90-43d1-bb31-6ba2350fe0bd",
+      "rootSessionId": "403c4b95-bf90-43d1-bb31-6ba2350fe0bd",
+      "inputMessageId": "6862ac1e-1295-4fe6-8005-9a3a3879b0c8",
+      "inputText": "PROBE_FAIL",
+      "turn": 1,
+      "status": "failed",
+      "members": [
+        {
+          "agentId": "observer",
+          "sessionId": "052daa8b-df66-4837-9d7b-621fe31d1bcb"
+        },
+        {
+          "agentId": "actor",
+          "sessionId": "030c74a1-35c1-4853-bd8d-8ee5e3d9ad85"
+        }
+      ],
+      "results": {},
+      "privateDelta": {},
+      "productDelta": {},
+      "memberPolicies": [
+        {
+          "id": "observer",
+          "description": "Restricted observer",
+          "systemPrompt": "Read permitted observations, communicate them, then submit. Do not inspect unrelated files.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "observer"
+          },
+          "variablePaths": [
+            "/score"
+          ],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [
+            "public-setting"
+          ],
+          "sendTo": [
+            "actor"
+          ],
+          "writePrivateKeys": [
+            "remembered"
+          ],
+          "writeVariableKeys": [
+            "score"
+          ]
+        },
+        {
+          "id": "actor",
+          "description": "Subjective actor",
+          "systemPrompt": "Use limited observations, receive the observer’s native message, then submit a short RP candidate.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "actor"
+          },
+          "variablePaths": [],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [],
+          "readPrivate": true,
+          "writePrivateKeys": [
+            "expressed"
+          ]
+        }
+      ],
+      "startedAt": "2026-10-11T01:45:01.965Z",
+      "taskId": "task-1",
+      "error": "Member Session 052daa8b-df66-4837-9d7b-621fe31d1bcb did not complete: {\"kind\":\"error\",\"error\":{\"message\":\"PROBE_LOCAL_MEMBER_FAILURE\",\"code\":\"UNKNOWN\"}}"
+    },
+    {
+      "id": "c0a28d7f-68b5-4326-99cf-15b87b3c6136",
+      "conversationId": "5f4ec5c2-1a78-43dc-a208-a09244a75eca",
+      "rootSessionId": "5f4ec5c2-1a78-43dc-a208-a09244a75eca",
+      "inputMessageId": "55ed0a9c-9381-4e93-a244-26b929784c70",
+      "inputText": "PROBE_CANCEL",
+      "turn": 1,
+      "status": "cancelled",
+      "members": [
+        {
+          "agentId": "observer",
+          "sessionId": "80f787d3-52b8-481c-9094-177f9a9fa40b"
+        }
+      ],
+      "results": {},
+      "privateDelta": {},
+      "productDelta": {},
+      "memberPolicies": [
+        {
+          "id": "observer",
+          "description": "Restricted observer",
+          "systemPrompt": "Read permitted observations, communicate them, then submit. Do not inspect unrelated files.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "observer"
+          },
+          "variablePaths": [
+            "/score"
+          ],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [
+            "public-setting"
+          ],
+          "sendTo": [
+            "actor"
+          ],
+          "writePrivateKeys": [
+            "remembered"
+          ],
+          "writeVariableKeys": [
+            "score"
+          ]
+        },
+        {
+          "id": "actor",
+          "description": "Subjective actor",
+          "systemPrompt": "Use limited observations, receive the observer’s native message, then submit a short RP candidate.",
+          "model": {
+            "provider": "rp-team-official-local",
+            "model": "actor"
+          },
+          "variablePaths": [],
+          "characterPaths": [
+            "/assistant_name"
+          ],
+          "settingIds": [],
+          "readPrivate": true,
+          "writePrivateKeys": [
+            "expressed"
+          ]
+        }
+      ],
+      "startedAt": "2026-10-11T01:45:02.454Z",
+      "taskId": "task-1",
+      "error": "teammate creation aborted: { kind: 'user' }"
+    }
+  ],
+  "bundle": {
+    "name": "@rp-team/official-tool-team",
+    "version": "0.1.0",
+    "description": "Public-API two-member ElecKoi team tool proof of concept",
+    "meta": {
+      "title": "@rp-team/official-tool-team",
+      "description": "Public-API two-member ElecKoi team tool proof of concept"
+    },
+    "enabled": true,
+    "installed": true,
+    "optional": false,
+    "removable": true,
+    "rows": [
+      {
+        "rowId": "rp-team-official-tool",
+        "moduleName": "file:///C:/Users/O4/Desktop/agent%20rp%20team/output/v041-official-pack/home/profiles/desktop/node_modules/@rp-team/official-tool-team/index.mjs",
+        "entryId": "include:rp-team-official-tool"
+      }
+    ],
+    "overrides": []
+  },
+  "loadedHashes": {
+    "index.mjs": "061aed8de0a5f86cd398f211f023cebb92f372a5bd528006573760a5494bcfe0",
+    "runtime.mjs": "ef3bab1abe7be4ff1e0d48bc96b085811ffac768c24b36d7be801833e5d15a02",
+    "journal.mjs": "54b46c3ac2365787b472b23f291e8cd1cba0a90d29da76b1a088efe51abab495"
+  }
+}

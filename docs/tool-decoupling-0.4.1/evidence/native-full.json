@@ -1,0 +1,213 @@
+{
+  "ok": true,
+  "userDataRoot": "C:\\Users\\O4\\Desktop\\agent rp team\\output\\v041-native-final-2",
+  "dshHome": "C:\\Users\\O4\\Desktop\\agent rp team\\output\\v041-native-final-2\\dsh-runtime\\home",
+  "databasePath": "C:\\Users\\O4\\Desktop\\agent rp team\\output\\v041-native-final-2\\eleckoi-common.sqlite3",
+  "conversationId": "cedc771b-4851-4059-bbaf-fcb549e54140",
+  "stableSessionId": "cedc771b-4851-4059-bbaf-fcb549e54140",
+  "runId": "1f75af07-4417-47bb-8f54-96ad3a335293",
+  "turn": 1,
+  "secondRunId": "7db43e09-0668-40ee-8a1d-1f8f2ff01d5f",
+  "secondTurn": 3,
+  "lifetimeRosterSmoke": {
+    "turns": [
+      {
+        "turnNumber": 3,
+        "runId": "30b764c7-4140-458b-9bfc-89301b036629",
+        "lifetimeTeammates": 6
+      },
+      {
+        "turnNumber": 4,
+        "runId": "210302b2-664f-4b2f-9a40-c55136ddcccb",
+        "lifetimeTeammates": 8
+      },
+      {
+        "turnNumber": 5,
+        "runId": "df08b4c6-8990-4f04-9139-8764a86c72f7",
+        "lifetimeTeammates": 10
+      },
+      {
+        "turnNumber": 6,
+        "runId": "ee64f66e-fe22-4bb6-8be1-f0970923ea9f",
+        "lifetimeTeammates": 12
+      },
+      {
+        "turnNumber": 7,
+        "runId": "2a11eed2-fb85-4007-b151-dde24fd62c62",
+        "lifetimeTeammates": 14
+      },
+      {
+        "turnNumber": 8,
+        "runId": "adcea8ad-5baf-4567-bc50-d6ac09284b06",
+        "lifetimeTeammates": 16
+      },
+      {
+        "turnNumber": 9,
+        "runId": "4ac10d99-a9ac-451e-a591-de2f6f565e3b",
+        "lifetimeTeammates": 18
+      }
+    ],
+    "totalLifetimeTeammates": 18,
+    "configuredMaxMembers": 9007199254740991
+  },
+  "priorityScenarios": [
+    {
+      "conversationId": "fcc2ead2-c279-45d9-ba10-f0b1572c4a97",
+      "runId": "3d042460-31ed-43c9-9bf9-d3555b43530b",
+      "concurrency": 1,
+      "requested": true,
+      "failed": false,
+      "memberStates": {
+        "agent-1": "complete",
+        "agent-2": "complete",
+        "agent-3": "complete",
+        "agent-4": "complete"
+      }
+    },
+    {
+      "conversationId": "fe7b1067-aee7-462c-87fd-62cbd3afbcb4",
+      "runId": "97de7359-9718-45c7-9877-652fe6175f21",
+      "concurrency": 4,
+      "requested": true,
+      "failed": false,
+      "memberStates": {
+        "agent-1": "complete",
+        "agent-2": "complete",
+        "agent-3": "complete",
+        "agent-4": "complete"
+      }
+    },
+    {
+      "conversationId": "c1077261-3358-4ac4-a806-bda8e9c3ef6c",
+      "runId": "977421ae-7468-4f3d-80a1-d4c8c34c6eb8",
+      "concurrency": 4,
+      "requested": false,
+      "failed": false,
+      "memberStates": {
+        "agent-1": "complete",
+        "agent-2": "skipped",
+        "agent-3": "complete",
+        "agent-4": "complete"
+      }
+    },
+    {
+      "conversationId": "009c46b0-ec99-417f-b927-0d1b2f2d8cd6",
+      "runId": "b1f7b7e0-3fd8-491e-93bd-8e7c77f51efa",
+      "concurrency": 4,
+      "requested": true,
+      "failed": true,
+      "memberStates": {
+        "agent-1": "complete",
+        "agent-2": "failed",
+        "agent-3": "complete",
+        "agent-4": "complete"
+      }
+    }
+  ],
+  "authoringScenarios": [
+    {
+      "conversationId": "7b2c707a-0f92-4f6c-8230-996242f0f440",
+      "runId": "8d459ea9-83b8-49e9-8fa5-59e9a2d12c9d",
+      "mode": "await",
+      "concurrency": 1,
+      "requesterSessions": [
+        "65455008-3cb7-410b-80d3-f9b071c97903"
+      ],
+      "executionCount": 3,
+      "editOperationId": "7ebf230c-fc9b-4247-8567-f56c7242a2f8",
+      "checkpointEvidence": {
+        "id": "author:238742ed-dbbe-4d8e-8a25-decffbb9871a",
+        "valuesLeaveHistoryUnchanged": true,
+        "rewindRestoresFirstTurn": true,
+        "noModelOnRewind": true
+      }
+    },
+    {
+      "conversationId": "6a44013b-7384-4f78-abcc-7f9626304062",
+      "runId": "0272ae9d-88df-4f5f-ab5e-8c71d616d65e",
+      "mode": "resume",
+      "concurrency": 1,
+      "requesterSessions": [
+        "9a8bbf62-5a00-401d-8748-a6560122bf1f",
+        "5defaf26-f894-43d8-8e67-9466314a559a"
+      ],
+      "executionCount": 4,
+      "editOperationId": "9de9e183-7361-49d2-9212-b7a113438c35"
+    },
+    {
+      "conversationId": "abee67a1-45a5-4568-ab4e-145cf806472d",
+      "runId": "8e654ea6-a41e-45b4-9ae8-395609d4ccdd",
+      "mode": "await",
+      "concurrency": 4,
+      "requesterSessions": [
+        "ac99d13a-886f-4a8a-a955-5b9e018cda28"
+      ],
+      "executionCount": 3,
+      "editOperationId": "eee5526b-5c0b-45ec-9f4d-1e016a8c7bbf"
+    },
+    {
+      "conversationId": "0985a9d1-eee1-4a22-8cd9-bb79f5af06ae",
+      "runId": "a6980bc5-a67b-40fb-b79e-b6195c95a9f1",
+      "mode": "resume",
+      "concurrency": 4,
+      "requesterSessions": [
+        "001d21ab-4542-45ef-89aa-5d774a7719fa",
+        "03371d09-bab4-42fb-a52f-9ec5bda9511c"
+      ],
+      "executionCount": 4,
+      "editOperationId": "6ab6f8e6-3fe9-4d91-85f4-4dbbad0859c0"
+    }
+  ],
+  "trajectoryEvidence": {
+    "executions": 26,
+    "nativeRequests": 26,
+    "nativeToolEvents": 88,
+    "nestedExecutions": 1
+  },
+  "assistantSeq": 21,
+  "assistantMessageId": "9eaeff57-d70b-4ded-8bad-5f47939c1b60",
+  "stateScenario": {
+    "conversationId": "0b9f829f-fb8e-47f9-a16b-17b9269f15fc",
+    "runId": "421fbc38-7f69-4999-a8c5-a1781fcdd872"
+  },
+  "retryScenario": {
+    "conversationId": "579ce50d-1510-4116-b989-07b7330c78c5",
+    "sourceRunId": "b5c15fee-e2a8-4630-9659-61f7bb4b3cc2",
+    "runId": "2e0c9e61-a43f-4b39-ae06-59caf54dff6c"
+  },
+  "cancellationScenario": {
+    "conversationId": "9226eeac-e24b-4ecb-9081-7aa4146e7b46",
+    "runId": "a886eaaa-51a7-494a-a4c3-136fbd7e92a8"
+  },
+  "disableScenario": {
+    "conversationId": "ce471f10-c41e-434f-8d64-b03848b2dc2e",
+    "runId": "86ae1353-2ceb-4945-ad72-778a46ff15f0"
+  },
+  "recoveryScenario": {
+    "runId": "rp-team-v024-recovery-ae2d2341-c8db-4f34-859a-4f49dd00dd41",
+    "incompleteRunId": "rp-team-v024-incomplete-2770f30a-bfda-48e6-85e2-feacd000fdf5",
+    "assistantSeq": 21
+  },
+  "clientFixture": {
+    "conversationId": "11973b99-b141-4d54-b8d8-98564cae7a87",
+    "sessionId": "11973b99-b141-4d54-b8d8-98564cae7a87",
+    "fixtureBundle": "@rp-team/v024-fixture-llm"
+  },
+  "pluginsInstalledForUi": true,
+  "coldProfileScenario": {
+    "conversationId": "f4f83aa7-4bc9-4438-ac90-58e1785fc8af",
+    "stableSessionId": "f4f83aa7-4bc9-4438-ac90-58e1785fc8af",
+    "firstRunId": "727b0512-fb0d-453a-ad88-5458c04601a5",
+    "resumedRunId": "bbcdd25b-b175-40fb-8059-da60ab3dd6b0",
+    "teammatesAfterFirstRun": 2,
+    "teammatesAfterReenable": 4
+  },
+  "finalBody": "V024_LOCAL_FIXTURE_PUBLICATION",
+  "fixtureProviderCalls": 114,
+  "fixtureLogPath": "C:\\Users\\O4\\Desktop\\agent rp team\\output\\v041-native-final-2\\rp-team-v024-fixture-model.jsonl",
+  "teamBundle": "@rp-team/dsh-roleplay-team",
+  "fixtureBundle": "@rp-team/v024-fixture-llm",
+  "archiveFormat": "eleckoi.desktop-chat-history",
+  "nativeTeamServiceBranch": "installed-missing-service",
+  "profileRetained": true
+}

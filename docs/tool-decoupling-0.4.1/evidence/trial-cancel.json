@@ -1,0 +1,49 @@
+{
+  "trialId": "trial-eed20919-5049-480a-bd32-c8ef656c6397",
+  "sourceConversationId": "69dc99a1-d6f2-4f39-8faf-21df9e8c1e18",
+  "status": "failed",
+  "variants": [
+    {
+      "id": "candidate-a",
+      "turns": [
+        {
+          "runId": "e23078f4-3be6-42b6-b18e-efa2bde4e342",
+          "body": "TRIAL_NATIVE_PUBLICATION_1",
+          "state": {
+            "count": 1
+          },
+          "status": "complete",
+          "usage": {
+            "requests": 3,
+            "reportedTokens": 96,
+            "elapsedMs": 333
+          }
+        }
+      ]
+    }
+  ],
+  "nativeModelRequests": [
+    {
+      "turn": 1,
+      "tool": "rp_team_state_version",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 1,
+      "tool": "rp_team_write_state",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 1,
+      "tool": "rp_team_publish",
+      "model": "rp-team-fixture"
+    },
+    {
+      "turn": 2,
+      "tool": "rp_team_state_version",
+      "model": "rp-team-fixture"
+    }
+  ],
+  "mode": "cancel-retry",
+  "sourceConversationUnchanged": true
+}

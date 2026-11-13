@@ -1,5 +1,31 @@
 export const NATIVE_PRESET_TOOLS = 'native:preset'
 
+// Denial names, not dependencies: members use Team-owned data tools. Unknown
+// future product tools are also refused by the execution guard below.
+export const HOST_PRODUCT_TOOLS = Object.freeze([
+  'eleckoi_glob_setting_files', 'eleckoi_grep_setting_files', 'eleckoi_read_setting_files', 'eleckoi_apply_setting_patch',
+  'eleckoi_glob_variables', 'eleckoi_grep_variables', 'eleckoi_read_variables', 'eleckoi_apply_variable_patch',
+  'eleckoi_read_uploaded_file', 'update_roleplay_plan'
+])
+export function isHostProductTool(name) { return name?.startsWith('eleckoi_') || name === 'update_roleplay_plan' }
+
+/** Applied to primary, nested and restored Agent scopes, even when no product
+ * schema is present yet. Trusted external tools never grant product access. */
+export function restrictMemberTools(agentCtx, { member, rootGroups, productDisabled, scheduled }) {
+  const allowed = allowedGroupsForAgent(member, rootGroups, productDisabled)
+  const isDenied = declaration => {
+    const name = declaration?.name ?? declaration?.function?.name ?? ''
+    if (!name) return false
+    if (name.startsWith('rp_team_')) return !scheduled
+    if (isHostProductTool(name)) return true
+    return !allowed.has(capabilityForDeclaration(declaration))
+  }
+  const stopFilter = agentCtx.tools.restrictDeclarations(declaration => !isDenied(declaration))
+  const stopGuard = agentCtx.tools.guard(execution => isDenied({ name: execution.name })
+    ? `Tool "${execution.name}" is not authorized by this agent's capabilities.` : undefined)
+  return () => { stopGuard(); stopFilter() }
+}
+
 export const CAPABILITIES = [
   ['builtin:web', 'Web search'], ['builtin:setting-library', 'Setting library'], ['builtin:variables', 'Story variables'],
   ['builtin:creator', 'Creator tools'], ['builtin:workspace', 'Workspace'], ['builtin:workflow', 'Workflow'],
@@ -28,10 +54,9 @@ export function toolGroups(declarations) { return new Set(declarations.map(capab
 
 export function capabilityForDeclaration(declaration) {
   const name = declaration?.name ?? declaration?.function?.name ?? ''
-  if (declaration?.type === 'web_search' || ['eleckoi_web_search', 'eleckoi_native_web_search_bridge', 'web_search', 'web_fetch'].includes(name)) return 'builtin:web'
-  if (/^(?:eleckoi_glob_setting_files|eleckoi_grep_setting_files|eleckoi_read_setting_files|eleckoi_apply_setting_patch|eleckoi_create_setting_file|eleckoi_update_setting_file|eleckoi_delete_setting_file|eleckoi_move_setting_file)$/u.test(name)) return 'builtin:setting-library'
+  if (declaration?.type === 'web_search' || ['web_search', 'web_fetch'].includes(name)) return 'builtin:web'
+  if (/^(?:eleckoi_glob_setting_files|eleckoi_grep_setting_files|eleckoi_read_setting_files|eleckoi_apply_setting_patch)$/u.test(name)) return 'builtin:setting-library'
   if (/^(?:eleckoi_glob_variables|eleckoi_grep_variables|eleckoi_read_variables|eleckoi_apply_variable_patch)$/u.test(name)) return 'builtin:variables'
-  if (/^(?:eleckoi_list_toolsets|eleckoi_describe_toolset|eleckoi_call_capability)$/u.test(name)) return 'builtin:creator'
   if (/^(?:shell_command|bash|pwsh|read|edit|write|exec_command|write_stdin|apply_patch|request_permissions)$/u.test(name)) return 'builtin:workspace'
   if (/^(?:todo_write|get_goal|create_goal|update_goal|job_output|job_list|job_kill|skill|workflow)$/u.test(name)) return 'builtin:workflow'
   if (name === 'update_roleplay_plan') return 'builtin:roleplay-workflow'

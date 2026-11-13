@@ -19,7 +19,8 @@ export function createTeamDeliveryAdapter(deliver, LlmAdapter) {
       if (provider !== TEAM_DELIVERY_PROVIDER || model !== TEAM_DELIVERY_MODEL) {
         throw new Error('Unknown RP Team local delivery route')
       }
-      return { provider, id: model, name: 'RP Team local delivery' }
+      // DSH checks capacity when switching routes. Local delivery only emits the already prepared body.
+      return { provider, id: model, name: 'RP Team local delivery', context: { contextWindow: Number.MAX_SAFE_INTEGER } }
     }
     async *stream(options) {
       if (options.provider !== TEAM_DELIVERY_PROVIDER || options.model !== TEAM_DELIVERY_MODEL) {

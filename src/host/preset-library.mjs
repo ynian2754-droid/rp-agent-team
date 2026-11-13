@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { exportPreset, normalizeTeamConfig, parsePreset, teamError } from '../shared/schema.mjs'
+import { usesParameterInsertions } from '../shared/author-parameters.mjs'
 
 const LIBRARY_VERSION = 1
 
@@ -134,7 +135,8 @@ export class PresetLibrary {
 
 export function portablePreset(config) {
   const portable = exportPreset(normalizeTeamConfig(config))
-  if (requires040(portable.config)) portable.dependencies.minimumPluginVersion = '0.4.0'
+  if (usesParameterInsertions(portable.config.authorParameters)) portable.dependencies.minimumPluginVersion = '0.7.0'
+  else if (requires040(portable.config)) portable.dependencies.minimumPluginVersion = '0.4.0'
   else if (requires030(portable.config)) portable.dependencies.minimumPluginVersion = '0.3.0'
   return portable
 }
@@ -142,9 +144,6 @@ export function portablePreset(config) {
 export function presetLibraryPath(store, ctx) {
   if (typeof store?.presetLibraryPath === 'string' && store.presetLibraryPath) return store.presetLibraryPath
   if (typeof store?.path === 'string' && store.path) return join(dirname(store.path), 'presets.json')
-  if (typeof ctx?.eleckoiStoryState?.pluginDataDir === 'string' && ctx.eleckoiStoryState.pluginDataDir) {
-    return join(ctx.eleckoiStoryState.pluginDataDir, 'presets.json')
-  }
   const home = process.env.DSH_HOME
   if (home) return join(home, 'plugins', 'rp-agent-team', 'presets.json')
   throw teamError('RP_TEAM_PRESET_LIBRARY_UNAVAILABLE', 'Preset library storage path is unavailable')

@@ -2,10 +2,10 @@ import { build } from 'esbuild'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { existsSync } from 'node:fs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const host = path.resolve(root, '..', existsSync(path.resolve(root, '..', 'ElecKoi-v0.2.4-adapt')) ? 'ElecKoi-v0.2.4-adapt' : 'ElecKoi')
+const hostArg = process.argv.indexOf('--host')
+const host = path.resolve(hostArg >= 0 ? process.argv[hostArg + 1] : path.join(root, '../../ElecKoi-next'))
 const output = path.join(root, 'output', 'playwright')
 await mkdir(output, { recursive: true })
 await build({
@@ -16,7 +16,7 @@ await build({
   alias: Object.fromEntries(['react', 'react-dom/client', 'react/jsx-runtime'].map(name => [name,
     path.join(host, 'node_modules', name === 'react' ? 'react/index.js' : name === 'react-dom/client' ? 'react-dom/client.js' : 'react/jsx-runtime.js')]))
 })
-const theme = await readFile(path.join(host, 'src/renderer/src/app/windows/styles/tokens.css'), 'utf8')
+const theme = await readFile(path.join(host, 'apps/web/src/app/windows/styles/tokens.css'), 'utf8')
 const fixtureCss = `
 *{box-sizing:border-box}
 body{margin:0;color:var(--text);background:var(--chat);font:14px/1.5 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif}
@@ -41,9 +41,11 @@ body{margin:0;color:var(--text);background:var(--chat);font:14px/1.5 "Segoe UI",
 .fixture-tabs button{padding:4px 9px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;cursor:pointer}
 .fixture-tabs button[aria-selected=true]{background:var(--active);color:var(--text)}
 .fixture-pane{min-height:0}.fixture-files{padding:20px;color:var(--muted)}
+.fixture-ledger{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 12px;border:1px dashed var(--line-strong);border-radius:8px;font-size:12px;color:var(--muted)}
+.fixture-ledger button{padding:2px 8px;border:1px solid var(--line-strong);border-radius:5px;background:transparent;color:inherit;font:inherit;cursor:pointer}
 @media(max-width:820px){.fixture{grid-template-columns:1fr}.fixture:not(.closed) .fixture-chat{display:none}.fixture-sidebar{border:0}}
 `
 await writeFile(path.join(output, 'index.html'), `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RP Team · UI fixture</title><style>${theme}
 ${fixtureCss}</style></head><body><div id="app"></div><script src="./preview.js"></script></body></html>`)
-await writeFile(path.join(output, 'README.md'), '# UI fixture\n\nBuilt client with Remote-shaped fixtures (src/preview/fixtures.js) and workspace-shaped props. Query parameters: `run=working|awaiting_commit|complete|failed|cancelled`, `page=config|team|run`, `c=2`, `w=narrow|wide`, `theme=dark`, `lang=en`. No model calls. This is not native DSH/Electron acceptance evidence.\n')
+await writeFile(path.join(output, 'README.md'), '# UI fixture\n\nBuilt client with Remote-shaped fixtures (src/preview/fixtures.js) and workspace-shaped props. Query parameters: `run=working|awaiting_commit|complete|failed|cancelled`, `page=run|team|presets|trial|state`, `c=2|3`, `w=narrow|wide`, `theme=dark`, `lang=en`, `fail=enable` (the host refuses the team switch), `fail=retry` (the host withholds retry because the config changed). No model calls. This is not native DSH/Electron acceptance evidence.\n')
 console.log(`Built UI fixture at ${output} from host ${host}`)

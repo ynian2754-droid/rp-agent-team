@@ -1,3 +1,28 @@
+export async function readSessionEvents(ctx, sessionId, signal) {
+  const observation = await ctx.sessionQuery.observeSession(sessionId, {
+    ...(signal ? { signal } : {}), projectionMode: 'none'
+  })
+  try { return structuredClone([...observation.events]) }
+  finally { observation[Symbol.dispose]() }
+}
+
+/** Whether an event still shows on the Session surface. Events without the field come from hosts older than 0.2.20. */
+export function isAppendedSurfaceEvent(event) {
+  return event?.surfaceOp === undefined || event.surfaceOp === 'append'
+}
+
+/** IDs of the real user inputs on the Session surface, plus the input this turn claims. */
+export function activeUserInputIds(events, claimedInput) {
+  const ids = new Set()
+  for (const event of events ?? []) {
+    if (event?.type !== 'user/message' || !isAppendedSurfaceEvent(event)) continue
+    const message = event.data?.message ?? event.data
+    if (message?.source?.kind === 'user' && typeof message.id === 'string' && message.id) ids.add(message.id)
+  }
+  if (claimedInput?.source?.kind === 'user' && typeof claimedInput.id === 'string' && claimedInput.id) ids.add(claimedInput.id)
+  return [...ids]
+}
+
 export function matchesRunInputMessage(run, message) {
   return Boolean((run.inputMessageId && message?.id === run.inputMessageId)
     || (run.requestId && String(message?.source?.rpcId ?? '') === run.requestId))

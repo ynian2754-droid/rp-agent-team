@@ -244,3 +244,9 @@ function stableJson(value) {
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`
   return JSON.stringify(value)
 }
+
+/** State writes a retry may replay: only from members it reuses, never from members (or the publisher) that run again. */
+export function writesToReplayOnRetry(writes, rerunAgentIds) {
+  const rerun = new Set(rerunAgentIds ?? [])
+  return (writes ?? []).filter(write => !rerun.has(write.agentId))
+}

@@ -28,7 +28,7 @@ await writeFile(path.join(packageRoot, 'tsconfig.host.json'), JSON.stringify({
 }, null, 2))
 await writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({
   name: packageName,
-  version: '0.2.1',
+  version: JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')).version,
   type: 'module',
   exports: {
     '.': { types: './src/index.ts', default: './src/index.ts' },

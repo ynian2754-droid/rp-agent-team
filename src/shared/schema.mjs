@@ -1,5 +1,5 @@
 import { normalizeValueSchema, validateValueSchema } from './value-schema.mjs'
-import { normalizeAuthorParameters } from './author-parameters.mjs'
+import { normalizeAuthorParameters, usesParameterInsertions } from './author-parameters.mjs'
 import { normalizeMemoryConfig } from './memory.mjs'
 export { normalizeValueSchema, validateValueSchema } from './value-schema.mjs'
 
@@ -671,7 +671,7 @@ function evaluate(projected, condition) {
 export function exportPreset(config) {
   const normalized = normalizeTeamConfig(config)
   const dependencies = {
-    ...(normalized.authorParameters?.length || normalized.memory?.collections?.length || normalized.execution.budget || normalized.agents.some(agent => agent.triggers.some(trigger => ['periodic', 'state_changed', 'message_received', 'keyword'].includes(trigger.type) || trigger.cooldownTurns !== undefined || trigger.id !== undefined)) ? { minimumPluginVersion: '0.4.0' } : normalized.state.definitions.some(item => item.valueSchema) || normalized.agents.some(agent => agent.communication.handoffs?.length) ? { minimumPluginVersion: '0.3.0' } : {}),
+    ...(usesParameterInsertions(normalized.authorParameters) ? { minimumPluginVersion: '0.7.0' } : normalized.authorParameters?.length || normalized.memory?.collections?.length || normalized.execution.budget || normalized.agents.some(agent => agent.triggers.some(trigger => ['periodic', 'state_changed', 'message_received', 'keyword'].includes(trigger.type) || trigger.cooldownTurns !== undefined || trigger.id !== undefined)) ? { minimumPluginVersion: '0.4.0' } : normalized.state.definitions.some(item => item.valueSchema) || normalized.agents.some(agent => agent.communication.handoffs?.length) ? { minimumPluginVersion: '0.3.0' } : {}),
     presets: [...new Set(normalized.agents.map(agent => agent.presetId).filter(Boolean))].sort(),
     models: [...new Map(normalized.agents
       .filter(agent => agent.modelRef !== 'inherit')

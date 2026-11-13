@@ -1,0 +1,2 @@
+export let TrajectoryTable, TrajectoryTimeline, TrajectoryToolbar, TrajectorySearchIndex, trajectoryTimelineFocusIndexes, trajectoryRecordId, formatElapsedSeconds, projectOfflineTrajectory
+export function bindTrajectoryComponents(value) { ({TrajectoryTable,TrajectoryTimeline,TrajectoryToolbar,TrajectorySearchIndex,trajectoryTimelineFocusIndexes,trajectoryRecordId,formatElapsedSeconds, projectOfflineTrajectory}=value) }
