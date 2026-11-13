@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { teamError } from './run-state.mjs'
-import { validateValueSchema } from '../shared/value-schema.mjs'
+import { formatValueIssues, validateValueSchema } from '../shared/value-schema.mjs'
 import { createRequestPersistence } from './request-persistence.mjs'
 import { stableJson } from './context-world-adapter.mjs'
 
@@ -155,8 +155,9 @@ export function createCommunication(config, {
       if (reusable) {
         validateEnvelope(reusable.result, rule.responseSchema, 'response')
         if (rule.mode === 'resume') {
+          // The scheduler takes the requester's depth and adds the hop itself; message.depth is already the target depth.
           activation = await onRequest({
-          from, to, depth: message.depth, reason, messageId: message.id, message: structuredClone(message), reuseTarget: true,
+            from, to, depth, reason, messageId: message.id, message: structuredClone(message), reuseTarget: true,
             requestId, handoffId: rule.id, mode: rule.mode,
             fromExecutionId: String(executionId ?? ''), reserveResume: true
           })
@@ -177,7 +178,7 @@ export function createCommunication(config, {
         } })
       } else {
         activation = await onRequest({
-          from, to, depth: message.depth, reason, messageId: message.id, message: structuredClone(message),
+          from, to, depth, reason, messageId: message.id, message: structuredClone(message),
           ...(rule ? { requestId, handoffId: rule.id, mode: rule.mode, fromExecutionId: String(executionId ?? ''), reserveResume: rule.mode === 'resume' } : {})
         })
         if (rule) requests.update(requestId, row => { row.activation = structuredClone(activation) })
@@ -215,6 +216,15 @@ export function createCommunication(config, {
     const bound = requests.bindTarget(requestId, String(executionId))
     await onChange()
     return bound
+  }
+
+  // Check a target's submission against its incoming handoff contract when it is made, so the target can fix it
+  // in the same activation. completeTarget still validates the final result after the activation ends.
+  function checkTargetResult({ requestId, agentId, result }) {
+    const row = requests.get(requestId)
+    if (!row || isTerminal(row.status) || row.mode === 'notify' || !row.responseSchema || row.to !== agentId) return false
+    validateEnvelope(projectEnvelope(normalizeEnvelope(result), row.responseSelectors), row.responseSchema, 'response')
+    return true
   }
 
   async function completeTarget({ requestId, targetExecutionId, result }) {
@@ -410,7 +420,7 @@ export function createCommunication(config, {
 
   return {
     send, request, messagesFor, allMessages, targetsFor,
-    bindTargetExecution, completeTarget, failTarget, activationFinished, cancelAll,
+    bindTargetExecution, checkTargetResult, completeTarget, failTarget, activationFinished, cancelAll,
     getRequest: requestId => requests.get(requestId), pendingRequests: () => requests.pending()
   }
 }
@@ -436,8 +446,7 @@ function projectEnvelope(envelope, selectors) {
 function validateEnvelope(envelope, schema, label) {
   const issues = validateValueSchema(envelope, schema)
   if (issues.length) {
-    const first = issues[0]
-    throw teamError(`RP_TEAM_HANDOFF_${label.toUpperCase()}_INVALID`, `Handoff ${label} ${first.path || '/'} ${first.message}`)
+    throw teamError(`RP_TEAM_HANDOFF_${label.toUpperCase()}_INVALID`, `Handoff ${label} ${formatValueIssues(issues, { emptyPath: '/' })}`)
   }
 }
 

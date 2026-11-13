@@ -295,7 +295,9 @@ test('mailbox applies send, receive, request, and requested-trigger ACLs without
   assert.deepEqual(mailbox.messagesFor('reviewer').map(message => message.type), ['message', 'request'])
   assert.equal(mailbox.messagesFor('writer').length, 0)
   assert.equal(requested.activation.queued, true)
-  assert.equal(activations[0].depth, 2)
+  // The scheduler receives the requester's depth and adds the hop; the request message records the target depth.
+  assert.equal(activations[0].depth, 1)
+  assert.equal(mailbox.messagesFor('reviewer').find(message => message.type === 'request').depth, 2)
   assert.equal(traces.length, 2)
   assert.deepEqual(mailbox.targetsFor('writer'), { sendTo: ['reviewer'], requestTo: ['reviewer'] })
   await assert.rejects(mailbox.send({ from: 'reviewer', to: 'writer', body: 'Not authorized.' }), { code: 'RP_TEAM_MESSAGE_NOT_ALLOWED' })
@@ -349,6 +351,27 @@ test('child tool guidance mirrors communication and state ACLs without exposing 
   assert.match(policy, /"namespace":"shared","path":"\/settings\/public"/u)
   assert.doesNotMatch(policy, /settings\/private|PRIVATE PEER PROMPT|secret value/u)
   assert.match(policy, /Only configured output agent publisher may publish/u)
+})
+
+test('child tool guidance spells out the declared shape of each writable path, and only of writable ones', () => {
+  const writer = agent('writer', {
+    statePermissions: [
+      { namespace: 'shared', path: '/clocks', access: 'readwrite' },
+      { namespace: 'shared', path: '/secret', access: 'read' }
+    ]
+  })
+  const definitions = [
+    { namespace: 'shared', path: '/clocks', type: 'array', default: [], valueSchema: {
+      type: 'array', items: { type: 'object', required: ['what', 'due'], properties: { what: { type: 'string' }, due: { type: 'string' }, kind: { enum: ['deadline', 'appointment'] } } }
+    } },
+    { namespace: 'shared', path: '/secret', type: 'object', default: {}, valueSchema: { type: 'object', required: ['hiddenKey'] } }
+  ]
+  const run = { runId: 'run-1', outputAgentId: 'publisher', communication: createCommunication(config([writer])), config: { state: { definitions } } }
+  const policy = childPolicy(writer, run, 1, new Map([
+    ['activation', { agentId: 'writer', activationNo: 1, agentContext: { sources: {} }, stateToolAccess: describeStateToolAccess(writer, definitions) }]
+  ]))
+  assert.match(policy, /"path":"\/clocks"\} \[\{what\*: string, due\*: string, kind: "deadline" \| "appointment"\}\]/u)
+  assert.doesNotMatch(policy, /hiddenKey/u, 'read-only paths do not advertise their shape')
 })
 
 test('internal result submission rejects a missing summary before saving it', async () => {

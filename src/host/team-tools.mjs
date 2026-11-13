@@ -73,7 +73,7 @@ export function registerTeamTools({
     parameters: { namespace: { type: 'string', required: true }, path: { type: 'string', required: true }, value: { type: 'json', required: true }, expectedVersion: { type: 'integer', required: true } }, output,
     execute: async args => {
       if (!member.outputAuthority.state) throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', `Agent ${member.id} has no state-write authority`)
-      const beforeState = run.captureStateBefore?.(args.namespace, args.path)
+      const beforeState = run.captureStateBefore?.(args.namespace, args.path, member.id)
       const before = observeStatePath(stateStore, run, args.namespace, args.path)
       const result = stateStore.write({ conversationId: run.conversationId, runId: run.runId, agentId: member.id, namespace: args.namespace, path: args.path, value: args.value, expectedVersion: args.expectedVersion })
       run.stateTransaction = stateStore.status({ conversationId: run.conversationId, runId: run.runId })
@@ -90,7 +90,7 @@ export function registerTeamTools({
     parameters: { namespace: { type: 'string', required: true }, path: { type: 'string', required: true }, expectedVersion: { type: 'integer', required: true } }, output,
     execute: async args => {
       if (!member.outputAuthority.state) throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', `Agent ${member.id} has no state-write authority`)
-      const beforeState = run.captureStateBefore?.(args.namespace, args.path)
+      const beforeState = run.captureStateBefore?.(args.namespace, args.path, member.id)
       const before = observeStatePath(stateStore, run, args.namespace, args.path)
       const result = stateStore.remove({ conversationId: run.conversationId, runId: run.runId, agentId: member.id, namespace: args.namespace, path: args.path, expectedVersion: args.expectedVersion })
       run.stateTransaction = stateStore.status({ conversationId: run.conversationId, runId: run.runId })

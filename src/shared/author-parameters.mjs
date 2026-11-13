@@ -1,4 +1,4 @@
-import { normalizeValueSchema, validateValueSchema } from './value-schema.mjs'
+import { formatValueIssues, normalizeValueSchema, validateValueSchema } from './value-schema.mjs'
 import { normalizeTeamConfig, teamError } from './schema.mjs'
 
 const PARAMETER_TYPES = new Set(['text', 'number', 'boolean', 'choice', 'agent', 'model', 'state'])
@@ -277,7 +277,7 @@ function validateParameterValue(parameter, value, agents, definitions, label) {
       throw invalid(`${label} has an unsupported parameter type`)
   }
   const issues = validateValueSchema(normalized, parameter.valueSchema)
-  if (issues.length) throw invalid(`${label}${issues[0].path || ''} ${issues[0].message}`)
+  if (issues.length) throw invalid(formatValueIssues(issues, { prefix: label }))
   return normalized
 }
 

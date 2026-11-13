@@ -206,7 +206,9 @@ export function createScheduler({
 
   async function notify({ stateChanges = [] } = {}) {
     if (stopped || signal?.aborted) return getStatus()
-    if (triggerTracker && stateChanges.length) await enqueueTriggerMatches(triggerTracker.matchStateChanges(stateChanges), 'state_changed')
+    if (triggerTracker && stateChanges.length) {
+      await enqueueTriggerMatches(triggerTracker.matchStateChanges(stateChanges), 'state_changed', triggeredDepth(stateChanges.map(change => change.writerId)))
+    }
     await evaluateConditions()
     wake()
     return getStatus()
@@ -214,12 +216,19 @@ export function createScheduler({
 
   async function notifyMessage(message) {
     if (!triggerTracker || stopped || signal?.aborted) return getStatus()
-    await enqueueTriggerMatches(triggerTracker.matchMessage(message, canReceiveMessage), message?.type ?? 'message')
+    await enqueueTriggerMatches(triggerTracker.matchMessage(message, canReceiveMessage), message?.type ?? 'message', triggeredDepth([message?.from]))
     wake()
     return getStatus()
   }
 
-  async function enqueueTriggerMatches(matches, reasonType) {
+  // An activation started by a member's message or state write sits one level below that member, as a request
+  // does, so chains of messages or state changes stay within maxDepth. Changes made outside a run start at 0.
+  function triggeredDepth(sourceAgentIds) {
+    const depths = sourceAgentIds.map(agentId => slotsByAgent.get(agentId)?.activation?.depth).filter(Number.isSafeInteger)
+    return depths.length ? Math.max(...depths) + 1 : 0
+  }
+
+  async function enqueueTriggerMatches(matches, reasonType, depth = 0) {
     const grouped = new Map()
     for (const match of matches ?? []) {
       const values = grouped.get(match.agentId) ?? []
@@ -244,7 +253,12 @@ export function createScheduler({
           reservation.triggerMatches = placeholder.triggerMatches
           reservation.triggerReasons = placeholder.reason.triggers
         } else {
-          enqueue(agentId, reason, 0, undefined, { triggerMatches: [...triggerMatches] })
+          try {
+            enqueue(agentId, reason, depth, undefined, { triggerMatches: [...triggerMatches] })
+          } catch (error) {
+            // enqueue already traced activation.blocked; the message or write itself still stands.
+            if (error?.code !== 'RP_TEAM_ACTIVATION_DEPTH') throw error
+          }
         }
       }
     }

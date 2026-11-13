@@ -122,6 +122,108 @@ test('resume reserves the source activation and queues it only after source and 
   assert.equal(schedulerTrace.filter(event => event.type === 'activation.queued' && event.data.resumeFromRequestId === 'resume-1').length, 1)
 })
 
+function chainConfig(ids, maxDepth) {
+  return {
+    execution: { concurrency: 1, maxActivations: 8, maxPerAgent: 2, maxDepth },
+    output: { agentId: ids[0] },
+    agents: ids.map((id, index) => ({
+      id,
+      triggers: index ? [{ type: 'requested_by_agent', from: [ids[index - 1]] }] : [{ type: 'always' }],
+      execution: { after: [] },
+      communication: {
+        sendTo: [], receiveFrom: [],
+        requestTo: ids[index + 1] ? [ids[index + 1]] : [], requestFrom: index ? [ids[index - 1]] : []
+      }
+    }))
+  }
+}
+
+test('each request hop adds one depth level, so maxDepth 3 runs a three-hop chain and blocks the fourth hop', async () => {
+  const ids = ['narrator', 'world', 'clerk', 'sim', 'extra']
+  const config = chainConfig(ids, 3)
+  const depths = {}
+  const failures = []
+  let scheduler
+  const communication = createCommunication(config, { onRequest: activation => scheduler.requestActivation(activation) })
+  scheduler = createScheduler({
+    config,
+    onActivate: async ({ agent, activation }) => {
+      depths[agent.id] = activation.depth
+      const next = ids[ids.indexOf(agent.id) + 1]
+      try { await communication.request({ from: agent.id, to: next, body: 'next hop', depth: activation.depth }) }
+      catch (error) { failures.push([agent.id, error.code]) }
+    }
+  })
+  await scheduler.run()
+  assert.deepEqual(depths, { narrator: 0, world: 1, clerk: 2, sim: 3 })
+  assert.deepEqual(failures, [['sim', 'RP_TEAM_ACTIVATION_DEPTH']])
+  assert.deepEqual(communication.allMessages().filter(message => message.type === 'request').map(message => [message.to, message.depth]),
+    [['world', 1], ['clerk', 2], ['sim', 3]])
+})
+
+test('a resumed requester runs again at its own depth, not one level deeper', async () => {
+  const config = { ...handoffConfig('resume'), output: { agentId: 'requester' } }
+  const seen = []
+  let requestId
+  let scheduler
+  const communication = createCommunication(config, {
+    onRequest: activation => scheduler.requestActivation(activation), setTimer: () => 1, clearTimer() {}
+  })
+  scheduler = createScheduler({
+    config,
+    onActivate: async ({ agent, activation, activationNo }) => {
+      seen.push(`${agent.id}:${activationNo}@${activation.depth}`)
+      if (agent.id === 'requester' && activationNo === 1) {
+        const result = await communication.request({ from: 'requester', to: 'target', handoffId: 'lookup',
+          summary: 'Find the clue', data: { query: 'where is the key' }, depth: activation.depth, executionId: 'run:requester:1' })
+        requestId = result.id
+      }
+    },
+    onActivationTerminal: async ({ agent, activation, status }) => {
+      if (status !== 'complete') return
+      if (agent.id === 'requester' && !activation.resumeFromRequestId) scheduler.settleResumeReservation(requestId, 'source', true)
+      if (agent.id === 'target' && activation.requestId === requestId) scheduler.settleResumeReservation(requestId, 'target', true)
+    }
+  })
+  await scheduler.run()
+  assert.deepEqual(seen, ['requester:1@0', 'target:1@1', 'requester:2@0'])
+})
+
+test('a target submission is checked against the response contract when it is made, listing every problem', async () => {
+  let requestId
+  const communication = createCommunication(handoffConfig(), {
+    onRequest: activation => { requestId = activation.requestId; return { queued: true, requestId } },
+    onAwait: async () => ({ summary: 'stub', data: { facts: [] } }), setTimer: () => 1, clearTimer() {}
+  })
+  await communication.request({ from: 'requester', to: 'target', handoffId: 'lookup',
+    summary: 'Find the clue', data: { query: 'where is the key' }, executionId: 'run:requester:1' })
+  await assert.rejects(async () => communication.checkTargetResult({ requestId, agentId: 'target', result: { summary: 'x', data: { facts: [1, 'blue door', 2] } } }),
+    { code: 'RP_TEAM_HANDOFF_RESPONSE_INVALID', message: 'Handoff response /data/facts/0 must be string; /data/facts/2 must be string' })
+  await assert.rejects(async () => communication.checkTargetResult({ requestId, agentId: 'target', result: { summary: 'x' } }),
+    { message: 'Handoff response /data is required' })
+  assert.equal(communication.checkTargetResult({ requestId, agentId: 'target', result: { summary: 'Found it.', data: { facts: ['blue door'] } } }), true)
+  assert.equal(communication.checkTargetResult({ requestId, agentId: 'requester', result: { summary: 'not the target' } }), false,
+    'only the target of the request is held to its response contract')
+
+  const notify = handoffConfig('notify')
+  delete notify.agents[0].communication.handoffs[0].responseSchema
+  assert.equal(createCommunication(notify).checkTargetResult({ requestId: 'missing', agentId: 'target', result: {} }), false)
+})
+
+test('validation messages list every problem with paths and name the allowed values', async () => {
+  const { describeValueSchema, formatValueIssues } = await import('../src/shared/value-schema.mjs')
+  const issues = Array.from({ length: 10 }, (_, index) => ({ path: `/items/${index}`, message: 'is required' }))
+  assert.equal(formatValueIssues(issues.slice(0, 2), { prefix: 'shared/list' }), 'shared/list/items/0 is required; shared/list/items/1 is required')
+  assert.match(formatValueIssues(issues), /\/items\/7 is required; and 2 more problems$/u)
+  assert.equal(formatValueIssues([{ path: '', message: 'must be an object' }], { emptyPath: '/' }), '/ must be an object')
+  assert.equal(describeValueSchema({
+    type: 'object', required: ['who', 'how'], properties: {
+      who: { type: 'string' }, how: { enum: ['saw', 'heard'] }, tags: { type: 'array', items: { type: 'string' } },
+      confidence: { type: 'number', minimum: 0, maximum: 1 }, notes: { type: 'object' }
+    }
+  }), '{who*: string, how*: "saw" | "heard", tags: [string], confidence: number 0..1, notes: object}')
+})
+
 test('await handoff projects both envelopes, rejects unrelated target executions, and persists exact correlation', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'rp-team-handoff-'))
   const trace = []

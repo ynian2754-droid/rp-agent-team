@@ -1,6 +1,7 @@
 import { buildAgentContext } from './context-policy.mjs'
 import { setPointerValue } from './context-world-adapter.mjs'
 import { describeStateToolAccess } from './state-store.mjs'
+import { describeValueSchema } from '../shared/value-schema.mjs'
 
 /** Build the host context categories from a captured roleplay snapshot. */
 export function projectAvailableSources(context, { currentInput, attachments = [], worldState = {} } = {}) {
@@ -137,7 +138,7 @@ function teamToolGuidance(agent, run, packet) {
   if (incomingHandoffs.length) {
     lines.push(`Incoming handoffs: ${incomingHandoffs.map(formatIncomingHandoff).join(' ')}`)
     lines.push(agent.outputAuthority.internal
-      ? 'For an incoming handoff with a responseSchema, return the validated terminal result through rp_team_submit_internal({ summary, data }); otherwise your terminal assistant text is captured as summary. The requester receives the terminal result automatically; do not send an extra rp_team_send.'
+      ? 'For an incoming handoff with a responseSchema, return the terminal result through rp_team_submit_internal({ summary, data }). A submission that breaks the responseSchema is rejected with every problem listed; fix them all and submit again. Without a responseSchema, your terminal assistant text is captured as summary. The requester receives the terminal result automatically; do not send an extra rp_team_send.'
       : 'This agent has no rp_team_submit_internal tool. An incoming handoff with a responseSchema cannot succeed because that contract requires typed {summary,data}; without responseSchema, terminal assistant text is captured as summary and returned automatically. Do not send an extra rp_team_send.')
   }
 
@@ -160,6 +161,14 @@ function teamToolGuidance(agent, run, packet) {
   }
   if (writable.length) {
     lines.push(`Write only these declared paths with rp_team_write_state after reading the current version: ${writable.map(formatStatePath).join(', ')}. Include that expectedVersion and do not mutate product state directly.`)
+    // An empty default array shows a member nothing about the items it must write, so spell out declared shapes.
+    const shapes = writable.flatMap(item => {
+      const definition = run.config?.state?.definitions?.find(row => row.namespace === item.namespace && row.path === item.path)
+      return definition?.valueSchema ? [`${formatStatePath(item)} ${describeValueSchema(definition.valueSchema)}`] : []
+    })
+    if (shapes.length) {
+      lines.push(`Declared value shapes (* marks a required key; a write below one of these paths must keep the whole value valid): ${shapes.join('; ')}.`)
+    }
     lines.push('Remove a permitted object property with rp_team_remove_state({ namespace, path, expectedVersion }); whole namespaces and world setting files cannot be removed.')
   } else if (agent.outputAuthority.state) {
     lines.push('You have no state paths that can be safely replaced with rp_team_write_state.')

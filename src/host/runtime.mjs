@@ -614,7 +614,7 @@ export function createRpAgentTeam(ctx, dependencies) {
     run.messages = []
     run.triggerStarts = []
     run.triggerCooldownMarkers = []
-    run.captureStateBefore = (namespace, path) => captureStateBefore(run, namespace, path)
+    run.captureStateBefore = (namespace, path, writerId) => captureStateBefore(run, namespace, path, writerId)
     run.notifyStateChanged = before => notifyStateChanged(run, before)
     mkdirSync(run.dataDir, { recursive: true })
     run.stateTransaction = stateStore.begin({
@@ -769,7 +769,8 @@ export function createRpAgentTeam(ctx, dependencies) {
     return await run.schedulerPromise
   }
 
-  function captureStateBefore(run, namespace, path) {
+  // writerId: the member making the write, so a state_changed trigger starts one level below it.
+  function captureStateBefore(run, namespace, path, writerId) {
     return (run.eventTracker?.stateWatchTargets(namespace, path) ?? []).flatMap(target => {
       const agent = agentById(run.config, target.agentId)
       const access = describeStateToolAccess(agent, [{ namespace: target.namespace, path: target.path }])[0]
@@ -778,7 +779,7 @@ export function createRpAgentTeam(ctx, dependencies) {
         conversationId: run.conversationId, runId: run.runId, agentId: target.agentId,
         namespace: target.namespace, path: target.path
       })
-      return [{ ...target, before: stateValue(result.value) }]
+      return [{ ...target, before: stateValue(result.value), ...(writerId ? { writerId } : {}) }]
     })
   }
 
@@ -1051,7 +1052,11 @@ export function createRpAgentTeam(ctx, dependencies) {
         content
       }]
     })
-    record(run, { type: 'model.input', agentId: run.sessionOwners?.get(sessionId)?.agentId ?? run.outputAgentId,
+    // Attribute the request to the member whose Session made it; only the root delivery falls back to the output agent.
+    const agentId = run.sessionBindings?.get(sessionId)?.agentId
+      ?? run.executionSessions?.find(row => row.sessionId === sessionId)?.agentId
+      ?? run.sessionOwners?.get(sessionId)?.agentId ?? run.outputAgentId
+    record(run, { type: 'model.input', agentId,
       data: {
         sessionId, ...(turn === undefined ? {} : { turn }), ...(stepNo === undefined ? {} : { step: stepNo }),
         requestId, provider: options.provider, model: options.model,
@@ -1315,6 +1320,8 @@ export function createRpAgentTeam(ctx, dependencies) {
     const binding = {
       runId: run.runId, agentId: pending.agentId, activation: pending.activationNo,
       executionId: execution.executionId, depth: pending.activation.depth,
+      // The handoff this execution answers; a resumed requester carries the request it made, not one it answers.
+      ...(pending.activation.requestId && !pending.activation.resumeFromRequestId ? { requestId: pending.activation.requestId } : {}),
       sessionId: session, marker, name, route: structuredClone(pending.route), presetId: pending.presetId
     }
     if (!run.childSessionIds.includes(session)) run.childSessionIds.push(session)
@@ -1621,7 +1628,7 @@ export function createRpAgentTeam(ctx, dependencies) {
       saveDraft: args => saveDraft(run, member, args),
       submitInternal: (args, exec) => submitInternal(run, member, args, exec),
       publish: (args, exec) => publishFromAgent(run, member, args, exec),
-      captureStateBefore: run.captureStateBefore,
+      captureStateBefore: (namespace, path) => run.captureStateBefore?.(namespace, path, member.id),
       notifyStateChanged: run.notifyStateChanged
     }
     const disposers = [registerTeamTools(args), registerContextTools({ ...args, attachments: ctx.attachments })]
@@ -1656,6 +1663,10 @@ export function createRpAgentTeam(ctx, dependencies) {
     if (!member.outputAuthority.internal) throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', `Agent ${member.id} has no internal-result authority`)
     const sessionId = String(exec?.agent?.session?.id ?? '')
     const executionId = run.executionSessions.find(row => row.sessionId === sessionId)?.executionId
+    // Reject a result that breaks the incoming handoff's responseSchema now, listing every problem, instead of
+    // failing the handoff after this execution has ended without a chance to fix it.
+    const answering = childBindings.get(sessionId)?.requestId
+    if (answering) run.communication?.checkTargetResult({ requestId: answering, agentId: member.id, result: { summary: args.summary, data: args.data } })
     const item = { agentId: member.id, executionId, summary: args.summary,
       data: args.data === undefined ? undefined : structuredClone(args.data), at: new Date().toISOString() }
     run.internalResults.push(item)

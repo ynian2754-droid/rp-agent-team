@@ -1,4 +1,4 @@
-# Host supplement for RP Agent Team 0.7.2
+# Host supplement for RP Agent Team 0.7.2 and 0.7.3
 
 The supplement extends the official product save path with turn-state staging and durable outcomes. It also supplies archive identity mapping, isolated desktop Host boot, scoped tool declarations and access to shared trajectory components.
 
@@ -9,7 +9,7 @@ The supplement extends the official product save path with turn-state staging an
 | v0.2.21 | `924e30aa6d22b45cea67a4376843764e25b94657` | [eleckoi-v0.2.21-win-rp-team-v0.7.2.patch](eleckoi-v0.2.21-win-rp-team-v0.7.2.patch) |
 | v0.2.20 | `7e1ee209c2b4cc0d14373a25c81fa024d0328597` | [eleckoi-v0.2.20-win-rp-team-v0.5.1.patch](eleckoi-v0.2.20-win-rp-team-v0.5.1.patch) |
 
-Both use DSH 0.2.2-rc.1 and support the 0.7.2 plugin.
+Both use DSH 0.2.2-rc.1 and support the 0.7.2 and 0.7.3 plugins.
 
 Apply the patch from an untouched checkout of that ElecKoi commit:
 

@@ -394,3 +394,31 @@ test('budget dispatch excludes local root delivery and title requests but counts
   assert.equal(isBudgetedTeamRequest(run, { provider: 'fixture', sessionId: 'child' }), true)
   assert.equal(isBudgetedTeamRequest(run, { provider: 'fixture', sessionId: 'child', purpose: 'session-title' }), false)
 })
+
+test('activations started by a member message or state write sit one level below that member and respect maxDepth', async () => {
+  const team = config([
+    agent('lead', [{ type: 'always' }]),
+    agent('relay', [{ type: 'message_received', from: ['lead'] }]),
+    agent('watcher', [{ type: 'state_changed', id: 'watch', namespace: 'shared', path: '/note' }]),
+    agent('late', [{ type: 'message_received', from: ['watcher'] }])
+  ], { execution: { concurrency: 1, maxActivations: 16, maxPerAgent: 4, maxDepth: 2 } })
+  const tracker = createTriggerTracker({ config: team })
+  const watch = tracker.stateWatchTargets()[0]
+  const depths = {}
+  const blocked = []
+  let scheduler
+  scheduler = createScheduler({
+    config: team, triggerTracker: tracker, canReceiveMessage: (id, message) => message.to === id,
+    onTrace: event => { if (event.type === 'activation.blocked') blocked.push([event.agentId, event.data.depth]) },
+    onActivate: async ({ agent: current, activation }) => {
+      depths[current.id] = activation.depth
+      if (current.id === 'lead') await scheduler.notifyMessage({ id: 'm1', sequence: 1, type: 'message', from: 'lead', to: 'relay' })
+      if (current.id === 'relay') await scheduler.notify({ stateChanges: [{ ...watch, writerId: 'relay',
+        before: { known: true, present: true, value: 1 }, after: { known: true, present: true, value: 2 } }] })
+      if (current.id === 'watcher') await scheduler.notifyMessage({ id: 'm2', sequence: 2, type: 'message', from: 'watcher', to: 'late' })
+    }
+  })
+  await scheduler.run()
+  assert.deepEqual(depths, { lead: 0, relay: 1, watcher: 2 })
+  assert.deepEqual(blocked, [['late', 3]], 'a message from depth 2 cannot start a third level under maxDepth 2, and the send itself does not fail')
+})

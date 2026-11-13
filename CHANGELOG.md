@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.3
+
+- Each request hop adds one level of activation depth. Before, a hop was counted twice, so `maxDepth` 3 allowed only one hop and a chain such as A → B → C → D stopped before C. A requester resumed by a `resume` handoff runs again at its own depth instead of one level deeper.
+- A rejected state write lists up to eight problems of the value at once, each with its path, instead of only the first. The error code is still `RP_TEAM_STATE_TYPE_MISMATCH`.
+- A handoff target's `rp_team_submit_internal` is checked against the incoming handoff's `responseSchema` when it is submitted. A mismatch comes back as a tool error that lists every problem, so the target can fix it and submit again. Before, the check ran only after the target had ended, and a mismatch failed the handoff.
+- Handoff request and response errors also list up to eight problems. A value outside an enum names the allowed values. Author-parameter and state-default errors in configurations use the same format.
+- Members see the declared shape of each state path they may write, with required keys marked, so an empty default array no longer hides what each item needs.
+- An activation started by a member's message or state write sits one level below that member, so chains of messages or state changes respect `maxDepth`. The message or write still succeeds when the triggered activation would be too deep; only that activation is blocked.
+- Model-input trace events name the member whose Session made the request. Before, every scheduled member's requests were recorded under the output agent.
+- Uses the same host supplements as 0.7.2.
+
 ## 0.7.2
 
 - Support the ElecKoi v0.2.21 Windows host supplement. Team state reads and edits use the host's live variable paths when available and preserve variable origins across renames.

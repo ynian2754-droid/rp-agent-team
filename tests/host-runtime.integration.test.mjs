@@ -230,6 +230,9 @@ function fixture({ receiptOutcome = 'pending', preparedTurn = 1, sessionListed =
             await assert.rejects(() => childScope.ctx.tools.invoke('eleckoi_apply_variable_patch', {}, child), /denied|not authorized/u)
             childContextReads.push(await childScope.ctx.tools.invoke('rp_team_read_context', { source: 'worldbook' }, child))
             childContextReads.push(await childScope.ctx.tools.invoke('rp_team_read_context', { source: 'recent_history' }, child))
+            // The member's own model request passes the llm/stream hook while its activation is running.
+            await dispatchLlmStream({ sessionId: childId, provider: model.provider, model: model.model,
+              messages: [{ role: 'user', content: 'member request' }] }, async () => ({}))
             await childScope.ctx.tools.invoke('rp_team_submit_internal', { summary: 'Observed the doorway.' }, child)
           } else {
             await childScope.ctx.tools.invoke('rp_team_publish', { body: 'The door opened onto the rain-lit street.' }, child)
@@ -395,7 +398,7 @@ function fixture({ receiptOutcome = 'pending', preparedTurn = 1, sessionListed =
     ctx, rootAgent, scopes, registeredAdapters, stageCalls, childRequests, childContextReads, invokedTools,
     registeredPresetDefinitions, presetSelections, presetBindings,
     sessionEvents,
-    emitSessionEvent, dispatchPreStep,
+    emitSessionEvent, dispatchPreStep, dispatchLlmStream,
     get runtime() { return runtime },
     get spawnCount() { return nextChildId - 1 },
     get currentTurnLookups() { return currentTurnLookups },
@@ -626,6 +629,11 @@ test('native Agent hooks run two scoped members, keep product tools denied, and 
     assert.equal(JSON.stringify(input).includes('private reasoning must not persist'), false)
     assert.equal(JSON.stringify(input).includes('sk-12345678901234567890'), false)
     assert.ok(trace.events.some(event => event.type === 'publication.local_delivery_route'))
+    // A member Session's model request is traced under that member, not under the output agent.
+    const memberAgent = trace.events.find(event => event.type === 'session.scope_installed' && event.data.sessionId === 'native-child-1')?.agentId
+    const memberInput = trace.events.find(event => event.type === 'model.input' && event.data.sessionId === 'native-child-1')
+    assert.ok(memberAgent && memberAgent !== trace.events.find(event => event.type === 'publication.local_delivery_route')?.agentId)
+    assert.equal(memberInput?.agentId, memberAgent)
 
     const committed = await f.commitRootTurn(body, activeNoticeReason)
     assert.equal(committed.run.phase, 'complete')

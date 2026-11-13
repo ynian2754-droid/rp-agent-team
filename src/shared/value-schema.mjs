@@ -66,6 +66,49 @@ export function validateValueSchema(value, schema) {
   return issues
 }
 
+const MAX_REPORTED_ISSUES = 8
+
+/**
+ * Join validation issues into one message so a model can fix a whole value in one retry instead of one field per
+ * call. Each issue reads `${prefix}${path} ${message}`; past `limit` the rest are counted.
+ */
+export function formatValueIssues(issues, { prefix = '', emptyPath = '', limit = MAX_REPORTED_ISSUES } = {}) {
+  const shown = issues.slice(0, limit).map(issue => `${prefix}${issue.path || emptyPath} ${issue.message}`)
+  const more = issues.length - shown.length
+  return `${shown.join('; ')}${more > 0 ? `; and ${more} more problem${more === 1 ? '' : 's'}` : ''}`
+}
+
+const MAX_LISTED_ENUM_VALUES = 16
+const MAX_SCHEMA_DESCRIPTION = 1600
+
+/**
+ * A compact, model-readable shape of a value schema: `{name*: string, tags: [string], kind: "a"|"b"}`.
+ * `*` marks a required key. Long schemas are cut at MAX_SCHEMA_DESCRIPTION characters.
+ */
+export function describeValueSchema(schema) {
+  const text = describe(normalizeValueSchema(schema))
+  return text.length > MAX_SCHEMA_DESCRIPTION ? `${text.slice(0, MAX_SCHEMA_DESCRIPTION - 1)}…` : text
+}
+
+function describe(schema) {
+  if (schema.enum) return listEnum(schema.enum, ' | ')
+  if (schema.properties || schema.required?.length) {
+    const required = new Set(schema.required ?? [])
+    const keys = [...new Set([...Object.keys(schema.properties ?? {}), ...required])]
+    return `{${keys.map(key => `${key}${required.has(key) ? '*' : ''}: ${schema.properties?.[key] ? describe(schema.properties[key]) : 'any'}`).join(', ')}}`
+  }
+  if (schema.items) return `[${describe(schema.items)}]`
+  const range = schema.minimum !== undefined || schema.maximum !== undefined
+    ? ` ${schema.minimum ?? ''}..${schema.maximum ?? ''}` : ''
+  return `${schema.type ?? 'any'}${range}`
+}
+
+function listEnum(values, separator) {
+  const shown = values.slice(0, MAX_LISTED_ENUM_VALUES).map(value => JSON.stringify(value))
+  const more = values.length - shown.length
+  return `${shown.join(separator)}${more > 0 ? `${separator}… (${more} more)` : ''}`
+}
+
 /** Resolve a nested schema for a value addressed by a JSON Pointer. */
 export function valueSchemaAtPath(schema, segments) {
   let current = schema
@@ -88,7 +131,7 @@ function validate(value, schema, path, issues) {
     return
   }
   if (schema.enum && !schema.enum.some(candidate => jsonEqual(candidate, value))) {
-    issues.push({ path, message: 'must match one of the allowed values' })
+    issues.push({ path, message: `must be one of ${listEnum(schema.enum, ', ')}` })
   }
   if (schema.minimum !== undefined || schema.maximum !== undefined) {
     if (typeof value !== 'number' || !Number.isFinite(value)) {

@@ -1,4 +1,4 @@
-import { normalizeValueSchema, validateValueSchema } from './value-schema.mjs'
+import { formatValueIssues, normalizeValueSchema, validateValueSchema } from './value-schema.mjs'
 import { normalizeAuthorParameters, usesParameterInsertions } from './author-parameters.mjs'
 import { normalizeMemoryConfig } from './memory.mjs'
 export { normalizeValueSchema, validateValueSchema } from './value-schema.mjs'
@@ -535,7 +535,7 @@ function normalizeState(value) {
       result.default = cloneJson(definition.default, 'state default')
       if (!matchesType(result.default, result.type)) throw teamError('RP_TEAM_INVALID_CONFIG', `State default does not match ${result.type}`)
       const issues = validateValueSchema(result.default, result.valueSchema)
-      if (issues.length) throw teamError('RP_TEAM_INVALID_CONFIG', `State default at ${result.namespace}${result.path} ${issues[0].path || ''} ${issues[0].message}`)
+      if (issues.length) throw teamError('RP_TEAM_INVALID_CONFIG', `State default at ${formatValueIssues(issues, { prefix: `${result.namespace}${result.path}` })}`)
     }
     if (definition.description !== undefined) result.description = textOrEmpty(definition.description, 'state description')
     return result

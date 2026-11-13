@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { normalizeTeamConfig, teamError } from '../shared/schema.mjs'
-import { validateValueSchema } from '../shared/value-schema.mjs'
+import { formatValueIssues, validateValueSchema } from '../shared/value-schema.mjs'
 
 const EMPTY_STATE = { version: 1, conversations: {} }
 const OMIT = Symbol('omit')
@@ -692,8 +692,7 @@ function validateConfiguredState(config, state) {
     }
     const issues = validateValueSchema(value, definition.valueSchema)
     if (issues.length) {
-      const issue = issues[0]
-      throw teamError('RP_TEAM_STATE_TYPE_MISMATCH', `State value at ${definition.namespace}${definition.path}${issue.path} ${issue.message}`)
+      throw teamError('RP_TEAM_STATE_TYPE_MISMATCH', `State value at ${formatValueIssues(issues, { prefix: `${definition.namespace}${definition.path}` })}`)
     }
   }
 }

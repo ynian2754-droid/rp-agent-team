@@ -1,10 +1,10 @@
-# RP Agent Team 0.7.2 安装与数据导入
+# RP Agent Team 0.7.3 安装与数据导入
 
-0.7.2 的适配目标是 ElecKoi v0.2.21 Windows x64 的源码提交 `924e30aa6d22b45cea67a4376843764e25b94657`，搭配 DSH 0.2.2-rc.1、Cordis 4.1.0、Electron 44.7.0。宿主补丁扩展正式聊天保存、状态回执、归档、轨迹和隔离试演，并沿用上游的变量身份迁移。插件配置沿用 schema 2。 [官方 Windows 构建源码](https://github.com/eleckoi/ElecKoi/commit/924e30aa6d22b45cea67a4376843764e25b94657)
+0.7.3 的适配目标是 ElecKoi v0.2.21 Windows x64 的源码提交 `924e30aa6d22b45cea67a4376843764e25b94657`，搭配 DSH 0.2.2-rc.1、Cordis 4.1.0、Electron 44.7.0。宿主补丁扩展正式聊天保存、状态回执、归档、轨迹和隔离试演，并沿用上游的变量身份迁移。插件配置沿用 schema 2。0.7.3 只改插件，宿主补丁和 0.7.2 相同。 [官方 Windows 构建源码](https://github.com/eleckoi/ElecKoi/commit/924e30aa6d22b45cea67a4376843764e25b94657)
 
 ## 构建和安装
 
-工作区内用 `启动电子爱-v0.2.21.ps1` 打开新版的独立档案。原来的 `启动新版电子爱.ps1` 打开 v0.2.20 档案，该宿主使用 `eleckoi-v0.2.20-win-rp-team-v0.5.1.patch`，可安装同一份 0.7.2 插件。准备新检出时，先核对交付的 `SHA256SUMS.txt`，再在确切源码提交上检查并应用对应补丁。
+工作区内用 `启动电子爱-v0.2.21.ps1` 打开新版的独立档案。原来的 `启动新版电子爱.ps1` 打开 v0.2.20 档案，该宿主使用 `eleckoi-v0.2.20-win-rp-team-v0.5.1.patch`，可安装同一份 0.7.3 插件。准备新检出时，先核对交付的 `SHA256SUMS.txt`，再在确切源码提交上检查并应用对应补丁。
 
 ```powershell
 git rev-parse HEAD
@@ -16,7 +16,7 @@ pnpm --filter eleckoi-desktop build
 pnpm check:electron-sqlite
 ```
 
-`$patchPath` 为 v0.2.21 交付中的 `eleckoi-v0.2.21-win-rp-team-v0.7.2.patch` 的绝对路径。宿主使用其锁定的 pnpm 10.32.1。启动构建后的 `apps/desktop` 时，为 Electron 传入独立的 `--user-data-dir`。在 DSH 插件管理器导入 `rp-team-dsh-roleplay-team-0.7.2.tgz`，按提示重启，然后打开角色聊天，点击输入区的「角色团队」。
+`$patchPath` 为 v0.2.21 交付中的 `eleckoi-v0.2.21-win-rp-team-v0.7.2.patch` 的绝对路径。宿主使用其锁定的 pnpm 10.32.1。启动构建后的 `apps/desktop` 时，为 Electron 传入独立的 `--user-data-dir`。在 DSH 插件管理器导入 `rp-team-dsh-roleplay-team-0.7.3.tgz`，按提示重启，然后打开角色聊天，点击输入区的「角色团队」。
 
 自行生成插件包时，在插件仓库使用 Node.js 22+ 和 pnpm 11.22.0，执行 `pnpm install --frozen-lockfile`、`pnpm test` 和 `pnpm pack:dshbundle`。包写入 `DSHbundle/`。
 
@@ -38,7 +38,7 @@ if ($LASTEXITCODE -ge 8) { throw 'Profile copy failed.' }
 .\启动电子爱-v0.2.21.ps1 -UserDataDirectory $newProfile
 ```
 
-首次启动会迁移数据库。在副本的 DSH 插件管理器导入 0.7.2，恢复插件依赖并按提示重启。验证聊天、队伍配置和变量历史后，从副本继续使用。直接运行启动脚本会进入预装插件的新档案。
+首次启动会迁移数据库。在副本的 DSH 插件管理器导入 0.7.3，恢复插件依赖并按提示重启。验证聊天、队伍配置和变量历史后，从副本继续使用。直接运行启动脚本会进入预装插件的新档案。
 
 ### 更早的团队版
 
