@@ -973,6 +973,8 @@ test('focused world retry reuses its staged stimulus and accepted clerk result',
 })
 
 test('an armed draft review can time out without taking the fallback publication away from its author', async () => {
+  // Host processes stay alive while the handoff timeout is unref'ed. The standalone fixture needs a reference too.
+  const keepAlive = setInterval(() => {}, 1000)
   let reviewExpired
   const waitForExpiry = new Promise(resolve => { reviewExpired = resolve })
   const originalDraft = 'Draft submitted for approval.'
@@ -1000,6 +1002,7 @@ test('an armed draft review can time out without taking the fallback publication
     const committed = await f.commitRootTurn(body)
     assert.equal(committed.run.phase, 'complete')
   } finally {
+    clearInterval(keepAlive)
     await f.dispose()
   }
 })
