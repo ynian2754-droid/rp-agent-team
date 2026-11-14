@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { defaultTeamConfig } from '../src/shared/schema.mjs'
 import { exportComponent, prepareComponentImport } from '../src/shared/components.mjs'
+import { resolveAuthorParameters } from '../src/shared/author-parameters.mjs'
 
 test('component export/import remaps author agent/state references, memory ports, and parameter tokens', () => {
   const source = defaultTeamConfig()
@@ -65,4 +66,31 @@ test('components without 0.4 features keep the older minimum plugin dependency',
   assert.equal(component.dependencies.minimumPluginVersion, '0.3.0')
   assert.equal(Object.hasOwn(component, 'authorParameters'), false)
   assert.equal(Object.hasOwn(component, 'memory'), false)
+})
+
+test('components remap option exclusions, prompt owners and tokens before applying the selected structure', () => {
+  const source = defaultTeamConfig()
+  source.output.agentId = 'agent-1'
+  source.agents[0].outputAuthority.user = true
+  source.agents[0].systemPrompt = 'Default {{param:tone}}.'
+  source.authorParameters = [
+    { id: 'tone', name: 'Tone', type: 'text', default: 'calm', bindings: [
+      { target: { kind: 'agent', agentId: 'agent-1', path: '/systemPrompt' }, mode: 'text' }
+    ] },
+    { id: 'mode', name: 'Mode', type: 'choice', default: 'base', bindings: [], options: [
+      { label: 'Base', value: 'base' },
+      { label: 'Compact', value: 'compact', structure: {
+        excludeAgents: ['agent-2'], prompts: { 'agent-1': 'Compact {{param:tone}}.' }
+      } }
+    ] }
+  ]
+  const component = exportComponent(source, ['agent-1', 'agent-2'], 'Modes')
+  assert.equal(component.dependencies.minimumPluginVersion, '0.7.19')
+  const imported = prepareComponentImport({ config: defaultTeamConfig(), component, importId: 'modes', bindings: { publisher: null } })
+  assert.ok(imported.config, JSON.stringify(imported.issues))
+  const mode = imported.config.authorParameters.find(parameter => parameter.name === 'Mode')
+  const resolved = resolveAuthorParameters(imported.config, { [mode.id]: 'compact' }).config
+  const [lead, inactive] = ['component-agent-1', 'component-agent-2'].map(ref => imported.agentIdMap[ref])
+  assert.equal(resolved.agents.find(agent => agent.id === lead).systemPrompt, 'Compact calm.')
+  assert.equal(resolved.agents.some(agent => agent.id === inactive), false)
 })

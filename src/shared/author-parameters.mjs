@@ -18,7 +18,7 @@ const SHA256_K = [
 ]
 
 /** Normalize declarations against the stable agent roster and declared state paths. */
-export function normalizeAuthorParameters(value, agents, definitions) {
+export function normalizeAuthorParameters(value, agents, definitions, publisher) {
   if (!Array.isArray(value)) throw invalid('authorParameters must be an array')
   if (!Array.isArray(agents) || !Array.isArray(definitions)) throw invalid('Author parameter references require agents and state definitions')
   const agentIds = new Set(agents.map(agent => agent.id))
@@ -27,8 +27,20 @@ export function normalizeAuthorParameters(value, agents, definitions) {
   for (const parameter of parameters) {
     if (ids.has(parameter.id)) throw invalid(`Duplicate author parameter id: ${parameter.id}`)
     ids.add(parameter.id)
+    for (const option of parameter.options ?? []) {
+      if (option.structure?.excludeAgents?.includes(publisher)) {
+        throw invalid(`Author parameter ${parameter.id} cannot exclude the publisher ${publisher}`)
+      }
+    }
+  }
+  if (parameters.filter(parameter => usesParameterStructure([parameter])).length > 1) {
+    throw invalid('Only one author parameter may select a team structure')
   }
   return parameters
+}
+
+export function usesParameterStructure(parameters) {
+  return (parameters ?? []).some(parameter => parameter.options?.some(option => option.structure !== undefined))
 }
 
 /** True when declarations use prompt insertion from choices, switches or numbers, or groups (plugin 0.7.0). */
@@ -92,6 +104,18 @@ export function resolveAuthorParameters(config, values = {}) {
 
   const resolvedDraft = cloneJson(source)
   const changes = []
+  const selector = source.authorParameters?.find(parameter => usesParameterStructure([parameter]))
+  const structure = selector?.options.find(option => stableJson(option.value) === stableJson(effectiveValues[selector.id]))?.structure
+  const replacedPrompts = structure?.prompts ?? {}
+  for (const agent of resolvedDraft.agents) {
+    if (!Object.hasOwn(replacedPrompts, agent.id)) continue
+    const systemPrompt = replacedPrompts[agent.id]
+    if (systemPrompt !== agent.systemPrompt) {
+      changes.push(change(selector.id, { mode: 'set', target: { kind: 'agent', agentId: agent.id, path: '/systemPrompt' } },
+        agent.systemPrompt, systemPrompt, false))
+      agent.systemPrompt = systemPrompt
+    }
+  }
   for (const parameter of source.authorParameters ?? []) {
     const value = effectiveValues[parameter.id]
     for (const binding of parameter.bindings) {
@@ -101,7 +125,11 @@ export function resolveAuthorParameters(config, values = {}) {
           throw invalid(`Text binding for ${parameter.id} must target an existing string field`)
         }
         const marker = `{{param:${parameter.id}}}`
-        if (!target.value.includes(marker)) throw invalid(`Text binding for ${parameter.id} has no ${marker} token at its target`)
+        if (!target.value.includes(marker)) {
+          if (binding.target.kind === 'agent' && binding.target.path === '/systemPrompt' &&
+            Object.hasOwn(replacedPrompts, binding.target.agentId)) continue
+          throw invalid(`Text binding for ${parameter.id} has no ${marker} token at its target`)
+        }
         const next = target.value.split(marker).join(parameterInsertText(parameter, value))
         if (next !== target.value) {
           changes.push(change(parameter.id, binding, target.value, next, false))
@@ -118,6 +146,18 @@ export function resolveAuthorParameters(config, values = {}) {
     }
   }
 
+  if (selector) {
+    const inactive = new Set(structure?.excludeAgents ?? [])
+    if (inactive.size) {
+      if (inactive.has(resolvedDraft.output.agentId)) throw invalid(`Author parameter ${selector.id} cannot exclude the publisher ${resolvedDraft.output.agentId}`)
+      const before = resolvedDraft.agents.map(agent => agent.id)
+      pruneInactiveMembers(resolvedDraft, inactive)
+      changes.push(change(selector.id, { mode: 'set', target: { kind: 'team', path: '/agents' } },
+        before, resolvedDraft.agents.map(agent => agent.id), false))
+    }
+    // The authored template and selected values are persisted separately from this run configuration.
+    delete resolvedDraft.authorParameters
+  }
   const resolvedConfig = normalizeTeamConfig(resolvedDraft)
   const normalizedValues = cloneJson(effectiveValues)
   return {
@@ -127,6 +167,57 @@ export function resolveAuthorParameters(config, values = {}) {
     sourceHash: sha256(stableJson(source)),
     resolvedHash: sha256(stableJson({ config: resolvedConfig, values: normalizedValues }))
   }
+}
+
+function pruneInactiveMembers(config, inactive) {
+  const active = id => !inactive.has(id)
+  const hasNamespace = namespace => !namespace?.startsWith('private:') || active(namespace.slice('private:'.length))
+  const usableCondition = condition => hasNamespace(condition.namespace) &&
+    (!condition.condition || usableCondition(condition.condition)) &&
+    (!condition.conditions || condition.conditions.every(usableCondition))
+  config.agents = config.agents.filter(agent => active(agent.id))
+  for (const agent of config.agents) {
+    const communication = agent.communication
+    for (const key of ['sendTo', 'receiveFrom', 'requestTo', 'requestFrom']) communication[key] = communication[key].filter(active)
+    if (communication.handoffs) communication.handoffs = communication.handoffs.filter(handoff => active(handoff.to))
+    agent.execution.after = agent.execution.after.filter(active)
+    agent.statePermissions = agent.statePermissions.filter(rule => hasNamespace(rule.namespace))
+    agent.context.sources = agent.context.sources.map(source => source.agentIds
+      ? { ...source, agentIds: source.agentIds.filter(active) }
+      : source)
+    agent.triggers = agent.triggers.flatMap(trigger => {
+      if (!hasNamespace(trigger.namespace) || (trigger.condition && !usableCondition(trigger.condition))) return []
+      if (!trigger.from?.length) return [trigger]
+      const from = trigger.from.filter(active)
+      return from.length ? [{ ...trigger, from }] : []
+    })
+  }
+  config.state.definitions = config.state.definitions.filter(definition => hasNamespace(definition.namespace))
+  if (config.memory) config.memory.collections = config.memory.collections.filter(collection => hasNamespace(collection.namespace))
+}
+
+function normalizeStructure(value, agentIds, label) {
+  if (!isRecord(value)) throw invalid(`${label} structure must be an object`)
+  rejectUnknown(value, ['excludeAgents', 'prompts'], `${label} structure`)
+  const structure = {}
+  const excluded = new Set()
+  if (value.excludeAgents !== undefined) {
+    if (!Array.isArray(value.excludeAgents)) throw invalid(`${label} excludeAgents must be an array`)
+    for (const id of value.excludeAgents) {
+      if (!agentIds.has(id) || excluded.has(id)) throw invalid(`${label} excludeAgents contains an unknown or duplicate agent id`)
+      excluded.add(id)
+    }
+    structure.excludeAgents = [...excluded]
+  }
+  if (value.prompts !== undefined) {
+    if (!isRecord(value.prompts)) throw invalid(`${label} prompts must be an object`)
+    for (const [id, prompt] of Object.entries(value.prompts)) {
+      if (!agentIds.has(id) || excluded.has(id)) throw invalid(`${label} cannot replace the prompt of unknown or excluded agent ${id}`)
+      if (typeof prompt !== 'string') throw invalid(`${label} replacement prompt for ${id} must be text`)
+    }
+    structure.prompts = cloneJson(value.prompts)
+  }
+  return structure
 }
 
 function normalizeParameter(value, index, agents, agentIds, definitions) {
@@ -145,10 +236,12 @@ function normalizeParameter(value, index, agents, agentIds, definitions) {
     }
     const options = value.options.map((option, optionIndex) => {
       if (!isRecord(option)) throw invalid(`Author parameter ${id} option ${optionIndex} must be an object`)
-      rejectUnknown(option, ['label', 'value', 'text'], `Author parameter ${id} option ${optionIndex}`)
+      const label = `Author parameter ${id} option ${optionIndex}`
+      rejectUnknown(option, ['label', 'value', 'text', 'structure'], label)
       return {
         label: requiredText(option.label, `Author parameter ${id} option label`), value: cloneJson(option.value),
-        ...(option.text === undefined ? {} : { text: textOrEmpty(option.text, `Author parameter ${id} option ${optionIndex} text`) })
+        ...(option.text === undefined ? {} : { text: textOrEmpty(option.text, `${label} text`) }),
+        ...(option.structure === undefined ? {} : { structure: normalizeStructure(option.structure, agentIds, label) })
       }
     })
     if (new Set(options.map(option => stableJson(option.value))).size !== options.length) {

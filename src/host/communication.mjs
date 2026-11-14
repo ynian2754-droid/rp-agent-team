@@ -3,12 +3,29 @@ import { teamError } from './run-state.mjs'
 import { formatValueIssues, validateValueSchema } from '../shared/value-schema.mjs'
 import { createRequestPersistence } from './request-persistence.mjs'
 import { stableJson } from './context-world-adapter.mjs'
+import { isHandoffRef, MISSING, nextHandoffRef, parsePointer, readPath, requesterFacingError, resolveHandoffRefs } from './handoff-refs.mjs'
+import { prepareReviewData } from './lived-history-review.mjs'
+
+const draftReviewLanes = ['check-draft', 'check-draft-presentation']
+
+export function parallelDraftReviewPeer(member) {
+  if (!member?.execution?.livedHistoryParallelDraftReview) return undefined
+  const lanes = draftReviewLanes.map(id => member.communication?.handoffs?.find(rule => rule.id === id))
+  if (!lanes.every(rule => rule?.mode === 'await' && rule.parallel && rule.terminal && rule.references &&
+    rule.scopedReview && rule.compactReview === 'draft')) return undefined
+  if (!lanes[0].autoPublish || lanes[1].autoPublish || lanes[0].to === lanes[1].to) return undefined
+  return lanes[1]
+}
+
+export function mergedDraftVerdict(row) {
+  return row?.mergedDraftReview?.verdict ?? row?.result?.data
+}
 
 /** ACL-checked messages and durable, execution-correlated handoff requests. */
 export function createCommunication(config, {
   run = {}, onRequest = async () => undefined, onAwait = async ({ promise }) => await promise,
   onResume = async () => undefined, onFailure = async () => undefined, onCancelTarget = async () => undefined,
-  onTrace = () => {}, onChange = async () => undefined, onMessage = async () => undefined,
+  onTrace = () => {}, onChange = async () => undefined, onMessage = async () => undefined, onMaterialPack, onWriterPresentation,
   onPersistRequests = () => {}, initialMessages = [],
   initialRequests = [], reusableRequests = [], requestTraceRoot,
   now = () => new Date(), setTimer = setTimeout, clearTimer = clearTimeout
@@ -21,6 +38,12 @@ export function createCommunication(config, {
   const waiters = new Map()
   const timers = new Map()
   const awaitingByAgent = new Map()
+  // Members that may write handoff references see the ref of each result they receive; everyone else keeps the
+  // plain {summary, data} result. A member writes references when one of its own handoffs allows them, or when it
+  // answers one that does and has requests of its own to forward.
+  const referenceWriters = new Set(config.agents.flatMap(agent => (agent.communication?.handoffs ?? [])
+    .filter(rule => rule.references).flatMap(rule => [agent.id, rule.to]))
+    .filter(id => agents.get(id)?.communication?.handoffs?.length))
   const requests = createRequestPersistence(run, {
     traceRoot: requestTraceRoot, persist: onPersistRequests,
     onTrace: (type, row, data) => onTrace({ type, agentId: row.from, data: { requestId: row.requestId, handoffId: row.handoffId, from: row.from, to: row.to, mode: row.mode, ...data } })
@@ -42,8 +65,11 @@ export function createCommunication(config, {
       if (to === '*') throw teamError('RP_TEAM_HANDOFF_TARGET_MISMATCH', 'A handoff message must have one configured target')
       rule = handoffFor(sender, handoffId, recipients[0])
       if (rule.mode !== 'notify') throw teamError('RP_TEAM_HANDOFF_REQUEST_REQUIRED', `Use rp_team_request for ${rule.mode} handoff ${rule.id}`)
+      const resolved = rule.references ? resolveHandoffRefs(data, { rows: run.handoffRequests, writer: from }) : undefined
+      if (resolved) payload = normalizeEnvelope({ body, summary, data: resolved.value })
       payload = projectEnvelope(payload, rule.requestSelectors)
       validateEnvelope(payload, rule.requestSchema, 'request')
+      traceResolvedRefs(from, rule.id, 'request', resolved)
     } else {
       const configuredTargets = new Set((sender.communication.handoffs ?? []).map(item => item.to))
       const bypassed = recipients.find(recipient => configuredTargets.has(recipient.id))
@@ -72,7 +98,87 @@ export function createCommunication(config, {
     return { id: messageId, recipients: recipients.map(agent => agent.id) }
   }
 
-  async function request({ from, to, body = '', summary, data, handoffId, topic, depth = 0, reason = 'agent request', executionId }) {
+  async function request(input) {
+    const prepared = prepareRequest(input)
+    if (prepared.rule?.mode !== 'await') return dispatchRequest(prepared)
+    return withWaitTargets(prepared.from, new Set([prepared.to]), () => dispatchRequest(prepared))
+  }
+
+  async function requestMany({ from, requests: inputs, depth = 0, executionId, draftReview = false }) {
+    if (!Array.isArray(inputs) || inputs.length < 2) {
+      throw teamError('RP_TEAM_HANDOFF_BATCH_INVALID', 'A handoff batch needs at least two independent await requests')
+    }
+    const prepared = inputs.map(input => {
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw teamError('RP_TEAM_HANDOFF_BATCH_INVALID', 'Each handoff batch entry must be a request object')
+      }
+      const entry = prepareRequest({ ...input, from, depth, executionId })
+      if (entry.rule?.mode !== 'await' || entry.rule.parallel !== true) {
+        throw teamError('RP_TEAM_HANDOFF_BATCH_INVALID', `Handoff ${entry.handoffId ?? entry.to} is not configured for parallel await`)
+      }
+      return entry
+    })
+    const targetIds = prepared.map(entry => entry.to)
+    const targets = new Set(targetIds)
+    if (targets.size !== targetIds.length
+      || targetIds.some(target => targetIds.some(peer => target !== peer && createsWaitCycle(peer, target)))) {
+      throw teamError('RP_TEAM_HANDOFF_BATCH_INVALID', 'A handoff batch requires distinct targets that do not depend on each other')
+    }
+    const people = prepared.filter(entry => entry.rule.materialPack).flatMap(entry => entry.projected.data.group)
+    if (new Set(people).size !== people.length) {
+      throw teamError('RP_TEAM_HANDOFF_BATCH_INVALID', 'Parallel material packs must have disjoint groups')
+    }
+    const batchId = draftReview ? randomUUID() : undefined
+    if (draftReview) {
+      const peer = parallelDraftReviewPeer(requireAgent(from))
+      if (!peer || prepared.length !== 2 || prepared[0].rule.id !== draftReviewLanes[0] || prepared[1].rule.id !== peer.id ||
+        prepared[0].worldReviewRequestId !== prepared[1].worldReviewRequestId ||
+        stableJson(prepared[0].projected.data) !== stableJson(prepared[1].projected.data)) {
+        throw teamError('RP_TEAM_HANDOFF_BATCH_INVALID', 'Both draft-review lanes must receive the same original draft and world result')
+      }
+    }
+
+    return withWaitTargets(prepared[0].from, targets, async () => {
+      const requestId = batchId ?? randomUUID()
+      const resumed = []
+      const promise = Promise.all(prepared.map(async entry => {
+        try {
+          const result = await dispatchRequest(entry, resumed, batchId)
+          return { handoffId: entry.rule.id, status: 'completed', ...result }
+        } catch (error) {
+          return { handoffId: entry.rule.id, status: 'failed', error: requesterFacingError(error, entry) }
+        } finally {
+          targets.delete(entry.to)
+        }
+      }))
+      const results = await onAwait({ from, requestId, promise })
+      for (const event of resumed) onTrace(event)
+      if (!batchId) return { results }
+      const lanes = draftReviewLanes.map(id => run.handoffRequests.find(row => row.draftReviewBatchId === batchId && row.handoffId === id))
+      const [primary] = lanes
+      const merged = { ...mergeDraftReviewIssues(primary.request.data.draft, lanes.map(row => row.status === 'completed' ? row.result?.data : undefined)),
+        lanes: lanes.map(({ requestId, ref, handoffId, status }) => ({ requestId, ref, handoffId, status })) }
+      requests.update(primary.requestId, row => { row.mergedDraftReview = merged })
+      onTrace({ type: 'publication.draft_review_merged', agentId: from, data: {
+        requestId: primary.requestId, batchId, lanes: merged.lanes, pass: merged.verdict.pass, issues: merged.verdict.issues.length
+      } })
+      return { results, review: { ref: primary.ref, data: merged.verdict, incomplete: merged.incomplete } }
+    })
+  }
+
+  async function withWaitTargets(from, targets, runWait) {
+    if (awaitingByAgent.has(from)) {
+      throw teamError('RP_TEAM_HANDOFF_EXECUTION_INACTIVE', `Agent ${from} is already waiting for a handoff`)
+    }
+    awaitingByAgent.set(from, targets)
+    try {
+      return await runWait()
+    } finally {
+      if (awaitingByAgent.get(from) === targets) awaitingByAgent.delete(from)
+    }
+  }
+
+  function prepareRequest({ from, to, body = '', summary, data, handoffId, topic, depth = 0, reason = 'agent request', executionId, presentation }) {
     const sender = requireAgent(from)
     const recipient = requireAgent(to)
     const status = requestStatus(sender, recipient)
@@ -101,14 +207,42 @@ export function createCommunication(config, {
       if (createsWaitCycle(from, to)) throw teamError('RP_TEAM_HANDOFF_CYCLE', `Handoff ${from} -> ${to} would create a wait or dependency cycle`)
     }
 
-    const payload = normalizeEnvelope({ body, summary, data })
+    // Expand handoff references first, so selectors and the request schema see the exact forwarded originals.
+    const resolved = rule?.references ? resolveHandoffRefs(data, { rows: run.handoffRequests, writer: from }) : undefined
+    const writerPresentationMode = rule?.compactReview === 'draft' && sender.execution?.livedHistoryWriterPresentation
+    const worldRef = rule?.compactReview === 'draft' &&
+      (writerPresentationMode || recipient.execution?.livedHistoryDialoguePremises || recipient.execution?.livedHistoryReviewPresentation ||
+        recipient.execution?.livedHistoryIndependentPremises)
+      ? resolved?.refs.find(ref => ref.at === '/world_return' && ref.side === 'result' && !ref.pointer) : undefined
+    const world = worldRef && run.handoffRequests.find(row => row.from === sender.id &&
+      row.sourceExecutionId === String(executionId ?? '') && row.handoffId === 'ask-world' &&
+      row.ref === worldRef.ref && row.status === 'completed')
+    const worldReviewRequestId = world?.requestId
+    let preparedData = resolved ? resolved.value : data
+    if (rule?.materialPack) preparedData = onMaterialPack({ from, to, executionId, data: preparedData })
+    if (rule?.compactReview) preparedData = prepareReviewData(rule.compactReview, preparedData, run.currentInput)
+    const payload = normalizeEnvelope({ body, summary, data: preparedData })
     const projected = rule ? projectEnvelope(payload, rule.requestSelectors) : payload
     if (rule) validateEnvelope(projected, rule.requestSchema, 'request')
-    const reusable = rule && ['await', 'resume'].includes(rule.mode)
+    let writerPresentation
+    if (writerPresentationMode) {
+      writerPresentation = rule.id === draftReviewLanes[1] ? [] : onWriterPresentation?.({
+        writer: sender, world, draft: projected.data?.draft, presentation
+      }) ?? []
+    }
+    return { from: sender.id, to: recipient.id, handoffId, topic, depth, reason, executionId, rule, resolved, projected,
+      worldReviewRequestId, writerPresentation }
+  }
+
+  async function dispatchRequest({ from, to, handoffId, topic, depth, reason, executionId, rule, resolved, projected,
+    worldReviewRequestId, writerPresentation }, batchResumeEvents, draftReviewBatchId) {
+    if (rule) traceResolvedRefs(from, rule.id, 'request', resolved)
+    const reusable = rule && !rule.simulation && !rule.scopedReview && ['await', 'resume'].includes(rule.mode)
       ? reusableRequests.find(previous => previous.status === 'completed'
         && previous.mode === rule.mode && previous.handoffId === rule.id
         && previous.from === from && previous.to === to && previous.topic === topic && previous.targetExecutionId
         && previous.result && stableJson(previous.request) === stableJson(projected)
+        && Boolean(previous.terminal) === Boolean(rule.terminal)
         && stableJson(previous.responseSchema ?? null) === stableJson(rule.responseSchema ?? null)
         && stableJson(previous.responseSelectors ?? null) === stableJson(rule.responseSelectors ?? null))
       : undefined
@@ -125,7 +259,17 @@ export function createCommunication(config, {
     mailbox.push(message)
     if (rule) {
       requests.create({
-        requestId, handoffId: rule.id, mode: rule.mode, from, to, sourceExecutionId: String(executionId ?? ''),
+        requestId, ref: nextHandoffRef(run.handoffRequests, { from, handoffId: rule.id }),
+        handoffId: rule.id, mode: rule.mode, from, to, sourceExecutionId: String(executionId ?? ''),
+        ...(rule.references ? { references: true } : {}),
+        ...(rule.terminal ? { terminal: true } : {}),
+        ...(rule.simulation ? { simulation: true } : {}),
+        ...(rule.materialPack ? { materialPack: true } : {}),
+        ...(rule.compactReview ? { compactReview: rule.compactReview } : {}),
+        ...(rule.scopedReview ? { scopedReview: true } : {}),
+        ...(draftReviewBatchId ? { draftReviewBatchId } : {}),
+        ...(worldReviewRequestId ? { worldReviewRequestId } : {}),
+        ...(writerPresentation === undefined ? {} : { writerPresentation: structuredClone(writerPresentation) }),
         request: structuredClone(projected), responseSelectors: rule.responseSelectors,
         responseSchema: rule.responseSchema, onFailure: rule.onFailure, timeoutMs: rule.timeoutMs,
         depth: depth + 1, ...(topic === undefined ? {} : { topic: String(topic) }), ...(reusable ? { reusedFromRunId: reusable.sourceRunId,
@@ -136,13 +280,7 @@ export function createCommunication(config, {
         void waiter.promise.catch(() => {})
         waiters.set(requestId, waiter)
       }
-      if (!reusable) {
-        const timer = setTimer(() => {
-          void failRequest(requestId, teamError('RP_TEAM_HANDOFF_TIMEOUT', `Handoff ${rule.id} timed out after ${rule.timeoutMs} ms`), { targetComplete: false })
-        }, rule.timeoutMs)
-        timer?.unref?.()
-        timers.set(requestId, timer)
-      }
+      if (!reusable && !rule.simulation) startRequestTimer(requests.get(requestId))
     }
 
     onTrace({ type: rule ? 'handoff.request_queued' : 'message.requested', agentId: from, data: {
@@ -152,6 +290,10 @@ export function createCommunication(config, {
     await onChange()
     let activation
     try {
+      const queued = rule && requests.get(requestId)
+      if (isTerminal(queued?.status)) {
+        throw teamError(queued.error.code, queued.error.message)
+      }
       if (reusable) {
         validateEnvelope(reusable.result, rule.responseSchema, 'response')
         if (rule.mode === 'resume') {
@@ -166,12 +308,13 @@ export function createCommunication(config, {
           row.activation = structuredClone(activation)
           row.targetExecutionId = String(reusable.targetExecutionId)
           row.targetActivationStatus = 'reused'
+          if (reusable.publicationReview) row.publicationReview = structuredClone(reusable.publicationReview)
           row.status = 'running'
         })
         requests.complete(requestId, { targetExecutionId: reusable.targetExecutionId, result: reusable.result })
         clearRequestTimer(requestId)
         await deliverResultMessage(requests.get(requestId), { status: 'completed', ...structuredClone(reusable.result) })
-        waiters.get(requestId)?.resolve(structuredClone(reusable.result))
+        waiters.get(requestId)?.resolve(withRef(requests.get(requestId), reusable.result, referenceWriters))
         onTrace({ type: 'handoff.target_reused', agentId: from, data: {
           requestId, handoffId: rule.id, reusedFromRunId: reusable.sourceRunId,
           reusedFromRequestId: reusable.requestId, targetExecutionId: reusable.targetExecutionId
@@ -187,25 +330,25 @@ export function createCommunication(config, {
     } catch (error) {
       if (rule) await failRequest(requestId, error, { targetComplete: true })
       waiters.delete(requestId)
-      throw error
+      throw batchResumeEvents ? handoffFailure(requests.get(requestId), error) : error
     }
 
     if (!rule || rule.mode !== 'await') return { id: requestId, activation, ...(rule ? { handoffId: rule.id, mode: rule.mode } : {}) }
     const resultPromise = waiters.get(requestId).promise
-    awaitingByAgent.set(from, { to, requestId, executionId: String(executionId ?? '') })
     onTrace({ type: 'handoff.waiting', agentId: from, data: { requestId, handoffId: rule.id, from, to, sourceExecutionId: executionId, targetActivation: activation } })
     await onChange()
     try {
-      const result = await onAwait({ from, requestId, promise: resultPromise })
-      onTrace({ type: 'handoff.resumed', agentId: from, data: {
+      const result = batchResumeEvents ? await resultPromise : await onAwait({ from, requestId, promise: resultPromise })
+      const resumed = { type: 'handoff.resumed', agentId: from, data: {
         requestId, handoffId: rule.id, sourceExecutionId: executionId, targetExecutionId: requests.get(requestId)?.targetExecutionId
-      } })
+      } }
+      if (batchResumeEvents) batchResumeEvents.push(resumed)
+      else onTrace(resumed)
       return result
     } catch (error) {
       if (!isTerminal(requests.get(requestId)?.status)) await failRequest(requestId, error)
       throw handoffFailure(requests.get(requestId), error)
     } finally {
-      if (awaitingByAgent.get(from)?.requestId === requestId) awaitingByAgent.delete(from)
       waiters.delete(requestId)
     }
   }
@@ -214,8 +357,17 @@ export function createCommunication(config, {
     const row = requests.get(requestId)
     if (!row || isTerminal(row.status)) return false
     const bound = requests.bindTarget(requestId, String(executionId))
+    if (bound && row.simulation && !timers.has(row.requestId)) startRequestTimer(row)
     await onChange()
     return bound
+  }
+
+  function bindWorldReviewFile(worldRequestId, fileRequestId, worldExecutionId) {
+    const world = requests.get(worldRequestId)
+    const file = requests.get(fileRequestId)
+    if (world?.handoffId !== 'ask-world' || world.status !== 'running' || world.targetExecutionId !== worldExecutionId ||
+      file?.handoffId !== 'ask-file' || file.status !== 'completed' || file.from !== world.to) return
+    requests.update(worldRequestId, row => { row.worldReviewFileRequestId = fileRequestId })
   }
 
   // Check a target's submission against its incoming handoff contract when it is made, so the target can fix it
@@ -225,6 +377,11 @@ export function createCommunication(config, {
     if (!row || isTerminal(row.status) || row.mode === 'notify' || !row.responseSchema || row.to !== agentId) return false
     validateEnvelope(projectEnvelope(normalizeEnvelope(result), row.responseSelectors), row.responseSchema, 'response')
     return true
+  }
+
+  function sealTargetResult(requestId) {
+    // The response was accepted before the deadline. The native turn/end still decides delivery.
+    clearRequestTimer(requestId)
   }
 
   async function completeTarget({ requestId, targetExecutionId, result }) {
@@ -243,10 +400,10 @@ export function createCommunication(config, {
     if (row.responseSchema && result?.typed !== true) {
       throw teamError('RP_TEAM_HANDOFF_RESULT_REQUIRED', `Handoff ${row.handoffId} requires rp_team_submit_internal with typed data`)
     }
-    if (requests.complete(requestId, { targetExecutionId, result: projected })) {
+    if (requests.complete(requestId, { targetExecutionId, result: projected, publicationReview: result?.publicationReview })) {
       clearRequestTimer(requestId)
       await deliverResultMessage(row, { status: 'completed', ...projected })
-      waiters.get(requestId)?.resolve(structuredClone(projected))
+      waiters.get(requestId)?.resolve(withRef(row, projected, referenceWriters))
       await onChange()
       return true
     }
@@ -299,12 +456,13 @@ export function createCommunication(config, {
     const changed = requests.fail(requestId, error, { targetExecutionId, targetComplete, cancelled })
     if (!changed) return false
     clearRequestTimer(requestId)
-    const errorValue = requests.get(requestId).error
+    // Requesters get a cleaned message; the request row and the trace keep the full upstream text.
+    const errorValue = requesterFacingError(requests.get(requestId).error, row)
     if (row.mode !== 'notify') await deliverResultMessage(row, { status: cancelled ? 'cancelled' : 'failed', error: errorValue })
     waiters.get(requestId)?.reject(handoffFailure(row, error))
-    if (targetWasNotStarted && !cancelled) {
+    if (!cancelled && (targetWasNotStarted || error?.code === 'RP_TEAM_HANDOFF_TIMEOUT')) {
       const removed = await onCancelTarget({ requestId, request: structuredClone(row), error })
-      if (removed) requests.update(requestId, current => { current.targetActivationComplete = true })
+      if (targetWasNotStarted && removed) requests.update(requestId, current => { current.targetActivationComplete = true })
     }
     await onChange()
     if (row.mode === 'resume') {
@@ -329,6 +487,7 @@ export function createCommunication(config, {
     const message = {
       id: `${row.requestId}:result`, requestId: row.requestId, sequence: ++sequence,
       type: 'handoff_result', from: row.to, to: row.from, handoffId: row.handoffId,
+      ...(row.ref && referenceWriters.has(row.from) ? { ref: row.ref } : {}),
       status: result.status, body: result.summary ?? result.error?.message ?? '',
       summary: result.summary ?? '',
       ...(result.data === undefined ? {} : { data: structuredClone(result.data) }),
@@ -341,10 +500,57 @@ export function createCommunication(config, {
     await onMessage(structuredClone(message))
   }
 
+  /** Expand handoff references in data `writer` sends or submits; `trace()` records which ones were used. */
+  function resolveRefs({ writer, data, handoffId, direction = 'response' }) {
+    const resolved = resolveHandoffRefs(data, { rows: run.handoffRequests, writer })
+    return { data: resolved.value, refs: resolved.refs, trace: () => traceResolvedRefs(writer, handoffId, direction, resolved) }
+  }
+
+  /**
+   * Expand references in an answer to an incoming handoff, when that handoff allows them. The answering member
+   * forwards what it received from its own requests, so the requester gets the exact originals.
+   */
+  function resolveAnswerRefs({ requestId, agentId, data }) {
+    const row = requests.get(requestId)
+    if (!row?.references || row.to !== agentId || data === undefined) return { data, refs: [], trace() {} }
+    return resolveRefs({ writer: agentId, data, handoffId: row.handoffId, direction: 'response' })
+  }
+
+  function resolveApprovedBody({ writer, bodyRef }) {
+    if (!isHandoffRef(bodyRef) || bodyRef.side !== 'request' || bodyRef.pointer !== '/draft') {
+      throw teamError('RP_TEAM_HANDOFF_REF_INVALID', 'Publication bodyRef must reference /draft of an approved handoff request with side: "request"')
+    }
+    const row = run.handoffRequests.find(item => item.from === writer && item.ref === bodyRef.$ref)
+    const paired = parallelDraftReviewPeer(requireAgent(writer))
+    const approved = paired ? row?.handoffId === draftReviewLanes[0] && row.mergedDraftReview?.verdict.pass === true
+      : row?.handoffId !== draftReviewLanes[1] && row?.result?.data?.pass === true
+    if (!row?.terminal || !row.references || row.status !== 'completed' || !approved) {
+      throw teamError('RP_TEAM_HANDOFF_REF_INVALID', 'Publication bodyRef needs your completed terminal handoff with references enabled and data.pass equal to true')
+    }
+    const resolved = resolveRefs({ writer, data: bodyRef, handoffId: row.handoffId, direction: 'publication' })
+    if (typeof resolved.data !== 'string' || !resolved.data.trim()) {
+      throw teamError('RP_TEAM_EMPTY_PUBLICATION', 'Publication bodyRef must resolve to non-empty text')
+    }
+    return resolved
+  }
+
+  function traceResolvedRefs(agentId, handoffId, direction, resolved) {
+    if (!resolved?.refs.length) return
+    onTrace({ type: 'handoff.refs_resolved', agentId, data: { handoffId, direction, refs: structuredClone(resolved.refs) } })
+  }
+
   function clearRequestTimer(requestId) {
     const timer = timers.get(requestId)
     if (timer !== undefined) clearTimer(timer)
     timers.delete(requestId)
+  }
+
+  function startRequestTimer(row) {
+    const timer = setTimer(() => {
+      void failRequest(row.requestId, teamError('RP_TEAM_HANDOFF_TIMEOUT', `Handoff ${row.handoffId} timed out after ${row.timeoutMs} ms`), { targetComplete: false })
+    }, row.timeoutMs)
+    timer?.unref?.()
+    timers.set(row.requestId, timer)
   }
 
   function messagesFor(agentId, senderIds) {
@@ -406,8 +612,8 @@ export function createCommunication(config, {
       const agent = agents.get(agentId)
       if (!agent) return false
       for (const dependency of agent.execution.after) if (reachesSource(dependency)) return true
-      const waiting = awaitingByAgent.get(agentId)
-      return Boolean(waiting && reachesSource(waiting.to))
+      for (const target of awaitingByAgent.get(agentId) ?? []) if (reachesSource(target)) return true
+      return false
     }
     return reachesSource(to)
   }
@@ -419,10 +625,30 @@ export function createCommunication(config, {
   }
 
   return {
-    send, request, messagesFor, allMessages, targetsFor,
-    bindTargetExecution, checkTargetResult, completeTarget, failTarget, activationFinished, cancelAll,
+    send, request, requestMany, validateRequest: input => { prepareRequest(input) }, messagesFor, allMessages, targetsFor,
+    bindTargetExecution, bindWorldReviewFile, checkTargetResult, sealTargetResult, completeTarget, failTarget, activationFinished, cancelAll, resolveRefs, resolveAnswerRefs, resolveApprovedBody,
     getRequest: requestId => requests.get(requestId), pendingRequests: () => requests.pending()
   }
+}
+
+export function mergeDraftReviewIssues(draft, verdicts) {
+  const issues = new Map()
+  let incomplete = verdicts.length !== draftReviewLanes.length
+  for (const data of verdicts) {
+    if (typeof data?.pass !== 'boolean' || !Array.isArray(data.issues) || data.pass !== (data.issues.length === 0) ||
+      data.issues.some(issue => typeof issue?.quote !== 'string' || !issue.quote.trim() || !draft.includes(issue.quote))) {
+      incomplete = true
+      continue
+    }
+    for (const issue of data.issues) {
+      const key = JSON.stringify([issue.quote, issue.kind])
+      const prior = issues.get(key)
+      if (!prior) issues.set(key, { ...issue })
+      else if (issue.note && issue.note !== prior.note) prior.note = [prior.note, issue.note].filter(Boolean).join('\n')
+    }
+  }
+  const ordered = [...issues.values()].sort((a, b) => draft.indexOf(a.quote) - draft.indexOf(b.quote))
+  return { verdict: { pass: !incomplete && ordered.length === 0, issues: ordered }, incomplete }
 }
 
 function normalizeEnvelope({ body, summary, data }) {
@@ -448,26 +674,6 @@ function validateEnvelope(envelope, schema, label) {
   if (issues.length) {
     throw teamError(`RP_TEAM_HANDOFF_${label.toUpperCase()}_INVALID`, `Handoff ${label} ${formatValueIssues(issues, { emptyPath: '/' })}`)
   }
-}
-
-const MISSING = Symbol('missing')
-function parsePointer(pointer) {
-  if (pointer === '') return null
-  if (typeof pointer !== 'string' || !pointer.startsWith('/')) throw teamError('RP_TEAM_HANDOFF_SELECTOR_INVALID', 'Handoff selectors must be JSON Pointer paths')
-  return pointer.slice(1).split('/').map(segment => {
-    if (/~(?:[^01]|$)/u.test(segment)) throw teamError('RP_TEAM_HANDOFF_SELECTOR_INVALID', `Invalid JSON Pointer escape in ${pointer}`)
-    return segment.replace(/~1/g, '/').replace(/~0/g, '~')
-  })
-}
-
-function readPath(value, segments) {
-  let current = value
-  for (const segment of segments) {
-    if (Array.isArray(current) && /^(?:0|[1-9]\d*)$/u.test(segment)) current = current[Number(segment)]
-    else if (current && typeof current === 'object' && Object.hasOwn(current, segment)) current = current[segment]
-    else return MISSING
-  }
-  return current
 }
 
 function writePath(target, segments, value) {
@@ -496,8 +702,13 @@ function isTerminal(status) { return ['completed', 'failed', 'cancelled'].includ
 
 function handoffFailure(request, error) {
   if (request?.onFailure === 'stop' || request?.error?.code === 'RP_TEAM_CANCELLED') return error
-  const issue = request?.error
-  return teamError(issue?.code ?? String(error?.code ?? 'RP_TEAM_HANDOFF_FAILED'), issue?.message ?? String(error?.message ?? error))
+  const issue = requesterFacingError(request?.error ?? error, request)
+  return teamError(issue.code, issue.message)
+}
+
+/** An await result as the requester receives it: the projected envelope, plus its reference for a member that can use one. */
+function withRef(row, envelope, referenceWriters) {
+  return { ...(row?.ref && referenceWriters.has(row.from) ? { ref: row.ref } : {}), ...structuredClone(envelope) }
 }
 
 function allows(configured, value) {

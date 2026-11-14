@@ -374,6 +374,30 @@ test('child tool guidance spells out the declared shape of each writable path, a
   assert.doesNotMatch(policy, /hiddenKey/u, 'read-only paths do not advertise their shape')
 })
 
+test('child tool guidance explains handoff references only to members that send requests they could forward', () => {
+  const writer = agent('writer', {
+    communication: { sendTo: ['middle'], receiveFrom: ['middle'], requestTo: ['middle'], requestFrom: [],
+      handoffs: [{ id: 'forward', to: 'middle', mode: 'await', references: true, timeoutMs: 1000, onFailure: 'return_error' }] }
+  })
+  const middle = agent('middle', {
+    triggers: [{ type: 'requested_by_agent', from: ['writer'] }],
+    communication: { sendTo: ['writer', 'leaf'], receiveFrom: ['writer', 'leaf'], requestTo: ['leaf'], requestFrom: ['writer'],
+      handoffs: [{ id: 'ask-leaf', to: 'leaf', mode: 'await', timeoutMs: 500, onFailure: 'return_error' }] }
+  })
+  const leaf = agent('leaf', {
+    triggers: [{ type: 'requested_by_agent', from: ['middle'] }],
+    communication: { sendTo: ['middle'], receiveFrom: ['middle'], requestTo: [], requestFrom: ['middle'] }
+  })
+  const run = { runId: 'run-1', outputAgentId: 'leaf', communication: createCommunication(config([writer, middle, leaf])) }
+  const policyFor = member => childPolicy(member, run, 1, new Map([
+    ['activation', { agentId: member.id, activationNo: 1, agentContext: { sources: {} }, stateToolAccess: [] }]
+  ]))
+  assert.match(policyFor(writer), /Handoff references \(forward\): every handoff result you receive carries a ref such as "ask-file#1"/u)
+  assert.match(policyFor(writer), /"references":true/u)
+  assert.match(policyFor(middle), /Handoff references \(forward\)/u, 'the answering member forwards what its own requests returned')
+  assert.doesNotMatch(policyFor(leaf), /Handoff references/u, 'a member that sends no requests has nothing to reference')
+})
+
 test('internal result submission rejects a missing summary before saving it', async () => {
   const tools = new Map()
   let submissions = 0

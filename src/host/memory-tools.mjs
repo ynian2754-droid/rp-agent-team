@@ -5,7 +5,7 @@ import { teamError } from '../shared/schema.mjs'
 /** Register ACL-scoped memory tools using the same host and caller checks as the Team tools. */
 export function registerMemoryTools({
   agentCtx, defineTool, member, run, stateStore, assertActiveCaller,
-  record, persistRun, captureStateBefore, notifyStateChanged
+  record, persistRun, captureStateBefore, notifyStateChanged, worldTurn
 }) {
   const collections = run.config.memory?.collections ?? []
   if (!collections.length) return () => {}
@@ -23,6 +23,7 @@ export function registerMemoryTools({
   }
   register({
     name: 'rp_team_memory_search',
+    isConcurrencySafe: () => true,
     description: 'Search records from one configured memory collection. Results contain only fields the current agent may read.',
     parameters: {
       collectionId: { type: 'string', required: true }, query: { type: 'string' }, person: { type: 'string' },
@@ -37,23 +38,32 @@ export function registerMemoryTools({
       return { ...result, version: state.version }
     }
   })
+  const orderedAppend = member.execution?.memoryAppend === true
   register({
-    name: 'rp_team_memory_add',
-    description: 'Add one record to a configured memory collection. State-write permission and output authority are required.',
+    name: orderedAppend ? 'rp_team_memory_append' : 'rp_team_memory_add',
+    description: orderedAppend
+      ? 'Append a new record at the current tail. Use one call per record, in story order. The host assigns the ID and position and returns the collection version for later updates.'
+      : 'Add one record to a configured memory collection. State-write permission and output authority are required.',
     parameters: {
       collectionId: { type: 'string', required: true }, record: { type: 'json', required: true },
-      expectedVersion: { type: 'integer', required: true }
+      ...(!orderedAppend ? { expectedVersion: { type: 'integer', required: true } } : {})
     }, output,
     execute: async args => {
       assertStateOutput(member)
+      if (worldTurn && args.collectionId === 'events' && args.record?.source === '用户') {
+        throw teamError('RP_TEAM_WORLD_START_INVALID', 'Register current user stimuli through rp_team_world_start')
+      }
       const collection = requireCollection(collections, args.collectionId)
       const state = readCollection(stateStore, run, member, collection)
-      assertExpectedVersion(args.expectedVersion, state.version)
+      if (!orderedAppend) assertExpectedVersion(args.expectedVersion, state.version)
       if (!Array.isArray(state.value)) throw teamError('RP_TEAM_MEMORY_UNAVAILABLE', 'Memory collection must be initialized as an array before adding records')
       const item = createMemoryRecord(args.record)
+      // Read the tail and stage its leaf synchronously. Existing record changes
+      // do not invalidate a new position. The state journal still validates the write.
       const path = pointerJoin(collection.path, String(state.value.length))
       const staged = stageWrite({ stateStore, run, member, collection, path, value: item, captureStateBefore })
-      const current = await finishMutation({ stateStore, run, member, collection, record, persistRun, notifyStateChanged, ...staged, operation: 'memory.add' })
+      const current = await finishMutation({ stateStore, run, member, collection, record, persistRun, notifyStateChanged,
+        ...staged, operation: orderedAppend ? 'memory.append' : 'memory.add' })
       return { added: true, id: item.id, version: current.version }
     }
   })
@@ -204,7 +214,7 @@ function searchVisibleRows(stateStore, run, member, collection, projected, inclu
   return visible
 }
 
-function createMemoryRecord(value) {
+export function createMemoryRecord(value) {
   if (!isRecord(value)) throw teamError('RP_TEAM_INVALID_REQUEST', 'Memory record must be an object')
   for (const field of ['id', 'createdAt', 'updatedAt']) {
     if (Object.hasOwn(value, field)) throw teamError('RP_TEAM_INVALID_REQUEST', `Memory record ${field} is assigned by the host`)

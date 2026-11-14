@@ -5,6 +5,7 @@ import { services, useKeyed } from './client-state.js'
 import { Field, Check, Icon, Section, Sigil, StatusTag } from './fields.jsx'
 import { stableContent, previewIsStale } from './author-model.js'
 import { forecast } from './explain.js'
+import { manualMembers } from './editor-model.js'
 
 export const authorViews = createKeyedStore(() => ({ inputText: '', manualAgentIds: [], preview: null, catalog: null, catalogError: false, state: null, checkpoints: [], stateEdits: {}, error: '', busy: '' }))
 
@@ -74,11 +75,13 @@ export function CheckPanel({ conversationId, editor, snapshot }) {
     return () => window.removeEventListener('focus', onFocus)
   }, [refreshCatalog, runKey])
   const invalid = Object.values(editor.invalid).some(Boolean)
-  const stale = previewIsStale(view.preview, editor.draft, view.catalog?.version, view.inputText, view.manualAgentIds) || Boolean(view.preview && view.preview.parameterContent !== stableContent(editor.parameterValues))
-  const manual = editor.draft.agents.filter(agent => agent.triggers.some(trigger => trigger.type === 'manual'))
+  let manual = []
+  try { manual = manualMembers(editor.draft, editor.parameterValues) } catch { /* The preview surfaces invalid draft details. */ }
+  const manualAgentIds = view.manualAgentIds.filter(id => manual.some(agent => agent.id === id))
+  const stale = previewIsStale(view.preview, editor.draft, view.catalog?.version, view.inputText, manualAgentIds) || Boolean(view.preview && view.preview.parameterContent !== stableContent(editor.parameterValues))
   const check = () => {
     const config = editor.draft
-    const { inputText, manualAgentIds } = view
+    const { inputText } = view
     const parameterValues = editor.parameterValues
     void authorCall(conversationId, 'previewConfig', { conversationId, config, parameterValues, inputText, manualAgentIds }, result => ({ preview: { ...result, draftContent: stableContent(config), parameterContent: stableContent(parameterValues), inputText, manualAgentIds } }))
       .then(() => refreshCatalog(), () => {})

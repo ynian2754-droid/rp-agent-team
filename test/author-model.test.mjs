@@ -81,4 +81,9 @@ test('handoff contracts preserve old V2 data and reject malformed rules; deletio
  for(const patch of [{mode:'unknown'},{timeoutMs:0},{responseSelectors:['bad']},{to:'missing'}]) {const invalid=structuredClone(next);Object.assign(invalid.agents[0].communication.handoffs[0],patch);assert.throws(()=>normalizeTeamConfig(invalid))}
  const duplicate=structuredClone(next);duplicate.agents[0].communication.handoffs.push(rule);assert.throws(()=>normalizeTeamConfig(duplicate),/Duplicate handoff/)
  const remaining=normalizeTeamConfig(removeAgent(next,'environment'));assert.equal(remaining.agents[0].communication.handoffs.length,0)
+ // The references switch survives editing elsewhere in the team and raises the required plugin version.
+ const forwarding=structuredClone(next);forwarding.agents[0].communication.handoffs[0].references=true
+ const third=forwarding.agents.find(agent=>agent.id!==forwarding.agents[0].id&&agent.id!==rule.to)
+ const kept=normalizeTeamConfig(third?removeAgent(forwarding,third.id):forwarding)
+ assert.equal(kept.agents[0].communication.handoffs[0].references,true);assert.equal(exportPreset(kept).dependencies.minimumPluginVersion,'0.7.4')
 })

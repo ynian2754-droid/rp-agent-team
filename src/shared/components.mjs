@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { normalizeTeamConfig, teamError } from './schema.mjs'
-import { usesParameterInsertions } from './author-parameters.mjs'
+import { normalizeTeamConfig, teamError, usesChronicleProvenance, usesFastHandoffs, usesHandoffReferences, usesLivedHistoryFocusedHandoffs, usesLivedHistoryGroundRefs, usesLivedHistoryIndependentReview, usesLivedHistoryParallelReview, usesLivedHistoryPreparedPublication, usesLivedHistoryRefChoices, usesLivedHistoryTypedTurns, usesLivedHistoryTurnTools, usesOrderedMemoryAppend, usesParallelHandoffs, usesPreparedLivedHistory, usesTerminalHandoffs } from './schema.mjs'
+import { usesParameterInsertions, usesParameterStructure } from './author-parameters.mjs'
 
 const AGENT_PORT = '@rp-team-agent-port:'
 const STATE_PORT = '@rp-team-state-port:'
@@ -132,6 +132,14 @@ export function exportComponent(config, agentIds, name) {
       }
       return binding
     })
+    for (const option of portable.options ?? []) {
+      const structure = option.structure
+      if (!structure) continue
+      const ref = id => makeAgentRef(id, `author parameter ${parameter.id} structure`)
+      if (structure.excludeAgents) structure.excludeAgents = structure.excludeAgents.map(ref)
+      if (structure.prompts) structure.prompts = Object.fromEntries(Object.entries(structure.prompts)
+        .map(([id, prompt]) => [ref(id), rewriteParameterTokens(prompt, parameterIds)]))
+    }
     return portable
   })
 
@@ -171,7 +179,7 @@ export function exportComponent(config, agentIds, name) {
   const component = {
     format: 'rp-team-component-v1',
     name: requiredText(name, 'component name'),
-    dependencies: { minimumPluginVersion: usesParameterInsertions(componentParameters) ? '0.7.0' : requires040(normalized) ? '0.4.0' : '0.3.0' },
+    dependencies: { minimumPluginVersion: usesParameterStructure(componentParameters) ? '0.7.19' : usesLivedHistoryParallelReview({ agents: selected }) ? '0.7.18' : usesLivedHistoryIndependentReview({ agents: selected }) ? '0.7.17' : usesLivedHistoryRefChoices({ agents: selected }) ? '0.7.16' : usesLivedHistoryPreparedPublication({ agents: selected }) ? '0.7.15' : usesLivedHistoryTypedTurns({ agents: selected }) ? '0.7.14' : usesLivedHistoryFocusedHandoffs({ agents: selected }) ? '0.7.13' : usesLivedHistoryGroundRefs({ agents: selected }) ? '0.7.12' : usesLivedHistoryTurnTools({ agents: selected }) ? '0.7.11' : usesOrderedMemoryAppend({ agents: selected }) ? '0.7.10' : usesChronicleProvenance({ agents: selected }) ? '0.7.9' : usesPreparedLivedHistory({ agents: selected }) ? '0.7.8' : usesFastHandoffs({ agents: selected }) ? '0.7.7' : usesParallelHandoffs({ agents: selected }) ? '0.7.6' : usesTerminalHandoffs({ agents: selected }) ? '0.7.5' : usesHandoffReferences({ agents: selected }) ? '0.7.4' : usesParameterInsertions(componentParameters) ? '0.7.0' : requires040(normalized) ? '0.4.0' : '0.3.0' },
     agents: componentAgents,
     state: { definitions: stateDefinitions },
     publisher: { portId: publisherPortId, suggestedAgentRef: outputRef },
@@ -394,6 +402,14 @@ export function prepareComponentImport({ config, component, importId, bindings =
       }
       return binding
     })
+    for (const option of parameter.options ?? []) {
+      const structure = option.structure
+      if (!structure) continue
+      const ref = id => mapParameterAgentRef(id, `authorParameters.${source.id}.structure`)
+      if (structure.excludeAgents) structure.excludeAgents = structure.excludeAgents.map(ref)
+      if (structure.prompts) structure.prompts = Object.fromEntries(Object.entries(structure.prompts)
+        .map(([id, prompt]) => [ref(id), rewriteParameterTokens(prompt, parameterIdMap)]))
+    }
     return parameter
   })
   const importedMemory = (portable.memory?.collections ?? []).map((source, index) => ({

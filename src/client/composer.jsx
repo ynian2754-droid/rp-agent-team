@@ -21,7 +21,8 @@ export function TeamToggle({ sessionId, useSessionStatus }) {
   if (!conversationId) return null
   const failed = snapshot.configState === 'error'
   const state = failed ? t('configUnavailable') : snapshot.enabled ? t('enabled') : t('disabled')
-  const manual = snapshot.enabled ? manualMembers(snapshot.config) : []
+  const manual = React.useMemo(() => snapshot.enabled ? manualMembers(snapshot.config, snapshot.parameterValues) : [],
+    [snapshot.enabled, snapshot.config, snapshot.parameterValues])
   const ready = snapshot.configState === 'ready'
   const title = failed ? snapshot.error : snapshot.config ? `${snapshot.config.name} · ${state}` : `${t('openTeam')}（${state}）`
   return <div className="rp-team-control">

@@ -1,7 +1,12 @@
 import { buildAgentContext } from './context-policy.mjs'
+import { projectDraftLaneMessage, scopedDraftLane, scopedDraftPremiseEvidence, scopedDraftSceneEvidence, scopedReviewEvidence, scopedReviewPrompt } from './lived-history-review.mjs'
+import { draftPassageChoices, scopedDraftOutcomes } from './lived-history-publication.mjs'
 import { setPointerValue } from './context-world-adapter.mjs'
 import { describeStateToolAccess } from './state-store.mjs'
 import { describeValueSchema } from '../shared/value-schema.mjs'
+import { createLivedHistoryPackSource, primeLivedHistoryPackReaders } from './lived-history-pack.mjs'
+import { simulationGroundChoiceIds } from './lived-history-sim-evidence.mjs'
+import { createLivedHistoryWorldFacts, focusLivedHistoryWorldContext, focusedWorldPrompt } from './lived-history-world.mjs'
 
 /** Build the host context categories from a captured roleplay snapshot. */
 export function projectAvailableSources(context, { currentInput, attachments = [], worldState = {} } = {}) {
@@ -77,19 +82,105 @@ export function makeSources(run, conversation) {
   return projectAvailableSources(context, { currentInput: run.currentInput, attachments: run.attachments })
 }
 
-export function createChildContextData({ run, agent, stateStore }) {
+export function createChildContextData({ run, agent, stateStore, activation }) {
   const transaction = { conversationId: run.conversationId, runId: run.runId }
   const activationState = stateStore.snapshot(transaction)
   const activationVersions = stateStore.versionsSnapshot(transaction)
   const stateToolAccess = describeStateToolAccess(agent, run.config.state.definitions)
+  const requestId = activation?.requestId
+  const request = requestId && !activation.resumeFromRequestId && run.communication.getRequest?.(requestId)
+  if (request?.to === agent.id && request.scopedReview) {
+    const messages = run.communication.allMessages().filter(message =>
+      message.type === 'request' && message.requestId === requestId && message.to === agent.id)
+    const reviewer = { ...agent, context: { sources: agent.context.sources.filter(source => source.type === 'agent_messages') } }
+    const agentContext = projectAgentContext(reviewer, {}, { messages })
+    const currentMessage = Array.isArray(agentContext.sources.agent_messages)
+      ? agentContext.sources.agent_messages.find(message => message?.requestId === requestId)
+      : undefined
+    const draftLane = scopedDraftLane(request, agent)
+    if (currentMessage && draftLane) agentContext.sources.agent_messages = [projectDraftLaneMessage(currentMessage, draftLane)]
+    const evidence = draftLane === 'fact' ? [] : scopedReviewEvidence(request.compactReview, currentMessage, { run, agent, stateStore })
+    if (evidence.length) {
+      agentContext.sources.review_evidence = evidence
+      agentContext.categories.push('review_evidence')
+    }
+    if (currentMessage && (draftLane || agent.execution?.livedHistoryDialoguePremises)) {
+      const cues = scopedDraftSceneEvidence(request, run)
+      if (cues.length) {
+        agentContext.sources.review_scene_cues = cues
+        agentContext.categories.push('review_scene_cues')
+      }
+    }
+    if (currentMessage && request.compactReview === 'draft' && draftLane !== 'presentation' && agent.execution?.livedHistoryIndependentPremises) {
+      agentContext.sources.review_independent_facts = scopedDraftPremiseEvidence(currentMessage, { run, agent, stateStore })
+      agentContext.categories.push('review_independent_facts')
+    }
+    let draftPassages
+    if (currentMessage && request.compactReview === 'draft' && !draftLane && request.writerPresentation === undefined && agent.execution?.livedHistoryReviewPresentation) {
+      const outcomes = scopedDraftOutcomes(run, agent, stateStore, request)
+      const draft = currentMessage.data?.draft
+      if (agent.execution.livedHistoryPassageChoices && agent.execution.livedHistoryDirectDraftReview && typeof draft === 'string') {
+        draftPassages = draftPassageChoices(draft, outcomes)
+        const { draft: _draft, ...data } = currentMessage.data
+        agentContext.sources.agent_messages = [{ ...currentMessage, data }]
+        agentContext.sources.review_passages = draftPassages.choices.map(({ id, text }) => [id, text])
+        agentContext.categories.push('review_passages')
+      }
+      agentContext.sources.review_outcomes = draftPassages?.outcomes ?? outcomes
+      agentContext.categories.push('review_outcomes')
+    }
+    return { activationState, activationVersions, stateToolAccess: [], agentContext, attachments: [], scopedReview: request.compactReview,
+      draftLane, draftPassages, writerPresentationReview: request.writerPresentation !== undefined }
+  }
   const worldState = authorizedWorldState(run, agent, stateStore)
   const sources = {
     ...run.sources, hidden_state: worldState, long_memory: worldState,
     scene_state: worldState.variables?.scene ?? {}
   }
-  const agentContext = projectAgentContext(agent, sources, { messages: run.communication.allMessages(), drafts: run.drafts })
-  const attachments = structuredClone(selectedAgentAttachments(agent, run.attachments))
-  return { activationState, activationVersions, stateToolAccess, agentContext, attachments }
+  let messages = run.communication.allMessages()
+  if (request?.simulation && agent.execution?.livedHistoryGroundChoices && simulationGroundChoiceIds(request.request.data).length) {
+    messages = messages.filter(message => message.type === 'request' && message.requestId === requestId && message.to === agent.id)
+      .map(message => {
+        const people = Object.fromEntries(Object.entries(message.data.people).map(([who, { ground_refs, ...material }]) => [who, material]))
+        return { ...message, data: { ...message.data, people } }
+      })
+  }
+  const agentContext = projectAgentContext(agent, sources, { messages, drafts: run.drafts })
+  primeLivedHistoryPackReaders({ run, agent, stateStore, versions: activationVersions })
+  const worldFacts = createLivedHistoryWorldFacts({ run, agent, stateStore })
+  if (worldFacts) {
+    agentContext.sources.world_facts = worldFacts
+    agentContext.categories.push('world_facts')
+  }
+  const focusedWorld = agent.execution?.livedHistoryFocusedWorld === true && request?.to === agent.id &&
+    request.handoffId === 'ask-world' && request.request?.data?.mode === '裁定'
+  if (focusedWorld) focusLivedHistoryWorldContext(agentContext, requestId)
+  const packSource = createLivedHistoryPackSource({ run, agent, stateStore, activation, versions: activationVersions })
+  if (packSource) agentContext.sources.material_selection = packSource.selection
+  const chronicle = agent.execution?.livedHistoryPhase === 'chronicleProvenance'
+  const opening = chronicle && run.currentInput?.startsWith('【开卷】')
+  const chronicleSources = chronicle ? scopeChronicleHistory(agentContext, opening) : undefined
+  const attachments = chronicle && !opening ? [] : structuredClone(selectedAgentAttachments(agent, run.attachments))
+  return {
+    activationState, activationVersions, stateToolAccess, agentContext, attachments,
+    ...(packSource ? { packSource } : {}), ...(chronicle ? { chronicleSources } : {}), ...(focusedWorld ? { focusedWorld } : {})
+  }
+}
+
+function scopeChronicleHistory(agentContext, opening) {
+  const { sources } = agentContext
+  const history = Array.isArray(sources.recent_history) ? sources.recent_history : []
+  const published = opening ? [] : history
+    .filter(message => message?.role === 'assistant' && typeof message.content === 'string' && message.content.trim())
+    .map((message, index) => ({ id: `published-${index + 1}`, text: message.content }))
+  const omitted = new Set(['recent_history', 'full_history', ...(!opening ? ['current_input'] : [])])
+  for (const category of omitted) delete sources[category]
+  agentContext.categories = agentContext.categories.filter(category => !omitted.has(category))
+  if (!opening) {
+    sources.chronicle_sources = published
+    agentContext.categories.push('chronicle_sources')
+  }
+  return published
 }
 
 export function childPolicy(agent, run, activation, pendingChildren) {
@@ -97,8 +188,13 @@ export function childPolicy(agent, run, activation, pendingChildren) {
   const context = packet?.agentContext?.sources ?? {}
   const policy = [
     `You are configured agent “${agent.name}” (id ${agent.id}) for run ${run.runId}, activation ${activation}.`,
-    agent.systemPrompt,
-    `Use only the context categories explicitly supplied below. Do not infer or request access to omitted parent history, role cards, hidden state, variables, world books, or attachments.`,
+    packet?.scopedReview ? scopedReviewPrompt(agent.systemPrompt, packet.scopedReview, { directDraftReview: agent.execution?.livedHistoryDirectDraftReview === true,
+      passageChoices: Boolean(packet.draftPassages), independentPremises: agent.execution?.livedHistoryIndependentPremises === true,
+      draftLane: packet.draftLane })
+      : agent.execution?.livedHistoryFocusedWorld ? focusedWorldPrompt(agent.systemPrompt, packet?.focusedWorld) : agent.systemPrompt,
+    packet?.focusedWorld
+      ? 'Use the current adjudication packet first. When a missing fact can change this beat, read only the necessary excerpt from an authorized source with rp_team_read_context or rp_team_search_context. Do not infer access to anything else.'
+      : 'Use only the context categories explicitly supplied below. Do not infer or request access to omitted parent history, role cards, hidden state, variables, world books, or attachments.',
     `Agent context categories: ${Object.keys(context).join(', ') || '(none)'}.`,
     teamToolGuidance(agent, run, packet),
     agent.id === run.outputAgentId && agent.outputAuthority.user
@@ -109,6 +205,17 @@ export function childPolicy(agent, run, activation, pendingChildren) {
 }
 
 function teamToolGuidance(agent, run, packet) {
+  if (packet?.scopedReview === 'draft' && agent.execution?.livedHistoryDirectDraftReview) {
+    const fields = agent.execution.livedHistoryReviewPresentation && !packet.writerPresentationReview ? 'pass, issues, presentation' : 'pass, issues'
+    return `Use only the current draft, adjudication and supplied evidence. Submit one verdict using rp_team_submit_internal({ ${fields} }). The host ends the activation on an accepted verdict.`
+  }
+  if (packet?.scopedReview) return 'The host prepared the complete material for this review. Use only the current request and its attached evidence. Submit one verdict using rp_team_submit_internal({ summary, data: { pass, issues } }). The host ends the activation on an accepted verdict.'
+  if (packet?.focusedWorld) return 'Start with rp_team_world_start and finish with rp_team_world_submit. They validate against the authorized state definitions. Ask-file returns its ref; use {"$ref":"ask-file#1","pointer":"/groups"} (your actual ref) to forward its groups. Additional source tools read only the configured character_card, worldbook or recent_history projections. Use existing state and memory tools only for a concrete missing fact or current version.'
+  if (packet?.simulation) return 'Submit the complete simulation once with rp_team_submit_internal({ summary, data: { beats, stateOps } }). The host checks and stages stateOps and supplies each beat’s wrote field. Use only the assigned material packet. There are no direct state or collaboration tools in this activation.'
+  if (packet?.chronicleSource) return 'Use the prepared chronicle_material and submit once using rp_team_submit_internal({ summary, data: { state, events } }). The host validates and stages the batch. The accepted submission ends the activation.'
+  if (agent.execution?.livedHistorySingleGroup && packet?.packSource?.present.length === 1) {
+    return 'The host prepared material_selection for the sole actor. Select evidence and immediately call rp_team_clerk_single_group once. The host handles simulation, retries, configured review and the final handoff.'
+  }
   const lines = [`Team tools for ${agent.id}:`]
   lines.push('Use rp_team_read_context({ source, path }) or rp_team_search_context({ source, query }) to inspect only your configured context. Read authorized file contents with rp_team_read_attachment({ index, offset }). Paths are relative to the filtered packet. ElecKoi native product tools and update_roleplay_plan are unavailable; do not use them. Write variables/settings through declared world state paths with rp_team_write_state, never host tools.')
   const targets = run.communication.targetsFor(agent.id)
@@ -124,6 +231,9 @@ function teamToolGuidance(agent, run, packet) {
       lines.push(`Configured handoffs: ${outboundHandoffs.map(formatHandoff).join(' ')}`)
       lines.push('Use the exact handoffId for a configured target. A target with declared handoffs cannot be called by omitting handoffId. Use rp_team_send({ to, handoffId, summary, data }) for notify; use rp_team_request({ to, handoffId, summary, data }) for await/resume. Legacy body calls remain available only where no handoff contract applies.')
       lines.push('Handoff modes: notify sends a message and returns immediately without scheduling the target; await blocks this native tool call, then resumes this same Session with the target’s validated terminal {summary,data}; resume queues a later activation after this activation and the target finish. The target’s terminal result is delivered back automatically; do not poll, add an after dependency, or send an extra rp_team_send to return it.')
+      if (new Set(outboundHandoffs.filter(rule => rule.mode === 'await' && rule.parallel).map(rule => rule.to)).size > 1) {
+        lines.push('Use rp_team_request_many({ requests: [{ to, handoffId, summary, data }, ...] }) for independent await handoffs marked parallel:true to distinct agents. Start them in one call when their inputs are ready. Its results follow the input order and each has a handoffId, status and a successful {summary,data} result or {error: {code,message}}. Keep a handoff that needs another result in a later call.')
+      }
       lines.push('Handoff selectors project the {summary,data} envelope: omitted selectors pass the whole envelope, an empty selector list passes no fields, and a non-empty list passes only those JSON Pointer fields.')
     } else {
       lines.push(targets.requestTo.length
@@ -140,6 +250,16 @@ function teamToolGuidance(agent, run, packet) {
     lines.push(agent.outputAuthority.internal
       ? 'For an incoming handoff with a responseSchema, return the terminal result through rp_team_submit_internal({ summary, data }). A submission that breaks the responseSchema is rejected with every problem listed; fix them all and submit again. Without a responseSchema, your terminal assistant text is captured as summary. The requester receives the terminal result automatically; do not send an extra rp_team_send.'
       : 'This agent has no rp_team_submit_internal tool. An incoming handoff with a responseSchema cannot succeed because that contract requires typed {summary,data}; without responseSchema, terminal assistant text is captured as summary and returned automatically. Do not send an extra rp_team_send.')
+    if (agent.outputAuthority.internal && incomingHandoffs.some(item => item.terminal)) {
+      lines.push('For a handoff marked terminal:true, finish all other tools before calling rp_team_submit_internal. The first accepted result ends this activation immediately.')
+    }
+  }
+
+  // Only requests a member sent can be referenced, so a member without outbound handoffs gets no reference guidance.
+  const outbound = Array.isArray(targets.handoffs) ? targets.handoffs : []
+  const referenceHandoffs = [...outbound, ...incomingHandoffs].filter(item => item.references)
+  if (agent.outputAuthority.internal && outbound.length && referenceHandoffs.length) {
+    lines.push(`Handoff references (${[...new Set(referenceHandoffs.map(item => item.id))].join(', ')}): every handoff result you receive carries a ref such as "ask-file#1" (your 1st ask-file request this run). In data for a handoff marked references:true you may write {"$ref": "ask-file#1"} instead of copying that result's data; add "pointer": "/groups" to take one part of it, or "side": "request" to forward the data you sent in that request. The host replaces the reference with the exact original before validation, so never re-type what a reference can carry. Only requests you sent in this run can be referenced.`)
   }
 
   if (agent.outputAuthority.draft) {
@@ -182,9 +302,13 @@ function formatHandoff(value) {
   const handoff = value?.handoff ?? value
   return JSON.stringify({
     id: handoff.id, to: handoff.to, mode: handoff.mode,
-    requestSchema: handoff.requestSchema, responseSchema: handoff.responseSchema,
-    requestSelectors: handoff.requestSelectors, responseSelectors: handoff.responseSelectors,
-    timeoutMs: handoff.timeoutMs, onFailure: handoff.onFailure
+    ...(handoff.materialPack
+      ? { materialPack: true, requestData: 'Submit the material-selection sheet from your instructions. The host supplies all packet fields from authorized originals.' }
+      : { requestSchema: handoff.requestSchema, requestSelectors: handoff.requestSelectors }),
+    responseSchema: handoff.responseSchema, responseSelectors: handoff.responseSelectors,
+    timeoutMs: handoff.timeoutMs, onFailure: handoff.onFailure,
+    ...(handoff.references ? { references: true } : {}), ...(handoff.terminal ? { terminal: true } : {}),
+    ...(handoff.parallel ? { parallel: true } : {})
   })
 }
 
@@ -194,14 +318,16 @@ function formatIncomingHandoff(value) {
     from: value.from, id: handoff.id, mode: handoff.mode,
     requestSchema: handoff.requestSchema, responseSchema: handoff.responseSchema,
     requestSelectors: handoff.requestSelectors, responseSelectors: handoff.responseSelectors,
-    timeoutMs: handoff.timeoutMs, onFailure: handoff.onFailure
+    timeoutMs: handoff.timeoutMs, onFailure: handoff.onFailure,
+    ...(handoff.references ? { references: true } : {}), ...(handoff.terminal ? { terminal: true } : {})
   })
 }
 
 export function childPrompt(agent, run, agentContext, activationNo, pendingChildren) {
   return [{ type: 'text', text: [
     childPolicy(agent, run, activationNo, pendingChildren),
-    'Filtered context packet:', JSON.stringify(agentContext.sources, null, 2)
+    'Filtered context packet:', JSON.stringify(agentContext.sources, null,
+      agentContext.sources.world_last_beat || agentContext.sources.world_source_lookup || agentContext.sources.review_passages ? undefined : 2)
   ].join('\n\n') }]
 }
 

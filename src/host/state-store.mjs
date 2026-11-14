@@ -100,9 +100,15 @@ export class StateStore {
   }
 
   write({ conversationId, runId, agentId, namespace, path = '', value, expectedVersion }) {
-    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
-      throw teamError('RP_TEAM_STATE_VERSION_REQUIRED', 'expectedVersion must be the version returned by state read')
-    }
+    assertWriteVersion(expectedVersion)
+    const target = { namespace, path, value, expectedVersion }
+    const [result] = this.writeBatch({ conversationId, runId, agentId, targets: [target] })
+    return { staged: true, baseVersion: result.baseVersion, expectedVersion }
+  }
+
+  /** Apply independent path writes to one journal document, publishing only the fully validated batch. */
+  writeBatch({ conversationId, runId, agentId, targets, validateOnly = false }) {
+    if (!targets.length) return []
     const document = this.readDocument()
     const conversation = requiredText(conversationId, 'conversationId')
     const record = own(document.conversations, conversation)
@@ -110,45 +116,23 @@ export class StateStore {
     const run = this.requireRun(record, runId)
     if (run.status !== 'open') throw teamError('RP_TEAM_STATE_NOT_OPEN', `Run state is ${run.status}`)
     const agent = requireAgent(run.config, agentId)
-    const target = validateTarget(namespace, path)
-    if (!target.path) throw teamError('RP_TEAM_STATE_PATH_INVALID', 'Writing an entire state namespace is not supported')
-    assertPermission(agent, target.namespace, target.path, 'write')
-    assertWritableSubtree(agent, target.namespace, target.path)
-    if (!stateDefinition(run.config, target.namespace, target.path)) {
-      throw teamError('RP_TEAM_STATE_PATH_UNDEFINED', `State path ${target.namespace}${target.path} is not declared`)
-    }
-    if (value === undefined) throw teamError('RP_TEAM_INVALID_STATE', 'State values must be JSON serializable')
-    const committedVersion = versionForPath(record.pathVersions, target.namespace, target.path)
-    const baselineVersion = versionForPath(run.basePathVersions, target.namespace, target.path)
-    if (committedVersion !== baselineVersion) throw stateConflict(target, baselineVersion, committedVersion)
-    const stagedVersion = versionForPath(run.stagedPathVersions, target.namespace, target.path)
-    if (stagedVersion !== expectedVersion) throw stateConflict(target, expectedVersion, stagedVersion)
-    const nextValue = cloneJson(value)
-    if (target.namespace === 'world' && target.path.startsWith('/settings')) {
-      const segments = decodePointer(target.path)
-      if (segments.length !== 2 || segments[0] !== 'settings' || !segments[1] || typeof nextValue !== 'string') {
-        throw teamError('RP_TEAM_STATE_TYPE_MISMATCH', 'World setting writes require one encoded virtual path and string content')
+    const accepted = []
+    for (const target of targets) {
+      const { namespace, path, expectedVersion } = target
+      assertWriteVersion(expectedVersion)
+      validateTarget(namespace, path)
+      if (accepted.some(other => overlaps(namespace, path, other.namespace, other.path))) {
+        throw teamError('RP_TEAM_STATE_BATCH_OVERLAP', `Batch contains overlapping writes at ${namespace}${path}`)
       }
-      // Publication can only replace an existing editable entry; fail now rather than after every member has run.
-      if (typeof getPointer(overlayWrites(run.state, run.writes).world, target.path) !== 'string') {
-        throw teamError('RP_TEAM_STATE_PATH_UNDEFINED', `World setting ${segments[1]} has no editable entry`)
-      }
+      stageStateWrite(record, run, agent, target)
+      accepted.push({ namespace, path, baseVersion: run.baseVersion, version: run.stagedVersion })
     }
-    const definition = stateDefinition(run.config, target.namespace, target.path)
-    if (definition && definition.path === target.path && !matchesType(nextValue, definition.type)) {
-      throw teamError('RP_TEAM_STATE_TYPE_MISMATCH', `State value at ${target.namespace}${target.path} must be ${definition.type}`)
-    }
-    const writes = journalWith(run.state, run.writes, {
-      namespace: target.namespace, path: target.path, value: nextValue, expectedVersion: baselineVersion, agentId
-    })
-    validateConfiguredState(run.config, overlayWrites(run.state, writes))
-    run.writes = writes
-    run.stagedVersion += 1
-    run.stagedPathVersions[pathKey(target.namespace, target.path)] = run.stagedVersion
+    validateConfiguredState(run.config, overlayWrites(run.state, run.writes))
+    if (validateOnly) return accepted
     setOwn(record.runs, run.runId, run)
     setOwn(document.conversations, conversation, record)
     this.writeDocument(document)
-    return { staged: true, baseVersion: run.baseVersion, expectedVersion }
+    return accepted
   }
 
   /** Stage removal of one declared object property using the same ACL and CAS rules as write(). */
@@ -515,6 +499,49 @@ export class StateStore {
       rmSync(temporary, { force: true })
     }
   }
+}
+
+function assertWriteVersion(expectedVersion) {
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+    throw teamError('RP_TEAM_STATE_VERSION_REQUIRED', 'expectedVersion must be the version returned by state read')
+  }
+}
+
+function stageStateWrite(record, run, agent, target) {
+  const { value, expectedVersion } = target
+  if (!target.path) throw teamError('RP_TEAM_STATE_PATH_INVALID', 'Writing an entire state namespace is not supported')
+  assertPermission(agent, target.namespace, target.path, 'write')
+  assertWritableSubtree(agent, target.namespace, target.path)
+  if (!stateDefinition(run.config, target.namespace, target.path)) {
+    throw teamError('RP_TEAM_STATE_PATH_UNDEFINED', `State path ${target.namespace}${target.path} is not declared`)
+  }
+  if (value === undefined) throw teamError('RP_TEAM_INVALID_STATE', 'State values must be JSON serializable')
+  const committedVersion = versionForPath(record.pathVersions, target.namespace, target.path)
+  const baselineVersion = versionForPath(run.basePathVersions, target.namespace, target.path)
+  if (committedVersion !== baselineVersion) throw stateConflict(target, baselineVersion, committedVersion)
+  const stagedVersion = versionForPath(run.stagedPathVersions, target.namespace, target.path)
+  if (stagedVersion !== expectedVersion) throw stateConflict(target, expectedVersion, stagedVersion)
+  const nextValue = cloneJson(value)
+  if (target.namespace === 'world' && target.path.startsWith('/settings')) {
+    const segments = decodePointer(target.path)
+    if (segments.length !== 2 || segments[0] !== 'settings' || !segments[1] || typeof nextValue !== 'string') {
+      throw teamError('RP_TEAM_STATE_TYPE_MISMATCH', 'World setting writes require one encoded virtual path and string content')
+    }
+    // Publication can only replace an existing editable entry; fail now rather than after every member has run.
+    if (typeof getPointer(overlayWrites(run.state, run.writes).world, target.path) !== 'string') {
+      throw teamError('RP_TEAM_STATE_PATH_UNDEFINED', `World setting ${segments[1]} has no editable entry`)
+    }
+  }
+  const definition = stateDefinition(run.config, target.namespace, target.path)
+  if (definition && definition.path === target.path && !matchesType(nextValue, definition.type)) {
+    throw teamError('RP_TEAM_STATE_TYPE_MISMATCH', `State value at ${target.namespace}${target.path} must be ${definition.type}`)
+  }
+  const writes = journalWith(run.state, run.writes, {
+    namespace: target.namespace, path: target.path, value: nextValue, expectedVersion: baselineVersion, agentId: agent.id
+  })
+  run.writes = writes
+  run.stagedVersion += 1
+  run.stagedPathVersions[pathKey(target.namespace, target.path)] = run.stagedVersion
 }
 
 function newConversation() { return { revision: 0, namespaces: {}, pathVersions: {}, runs: {}, authorEdits: {} } }

@@ -748,7 +748,7 @@ async function startVariant({ plan, variant, snapshot, variantRoot, signal }) {
     const { config } = parameterResolution
     const saved = await team.getConfig({ conversationId })
     await team.saveConfig({ conversationId, expectedRevision: saved.revision, enabled: true, config,
-      parameterValues: variant.parameterValues })
+      parameterValues: config.authorParameters ? variant.parameterValues : {} })
 
     await applySourceWorldState(team, conversationId, snapshot.sourceState)
     const completed = variant.turns.length

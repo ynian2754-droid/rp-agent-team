@@ -16,7 +16,7 @@ export function registerContextTools({ agentCtx, defineTool, member, run, stateS
   const disposers = []
   const output = { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] }
   const register = definition => disposers.push(agentCtx.tools.register(defineTool({
-    ...definition, output,
+    ...definition, output, isConcurrencySafe: () => true,
     async execute(args, exec) {
       assertActiveCaller(exec.agent)
       exec.signal?.throwIfAborted()

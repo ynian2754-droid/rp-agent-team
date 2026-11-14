@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.7.19
+
+- Author choice options can select the active team roster and replace full member prompts. The parameter editor shows the effective roster before saving, and the host freezes it for each turn.
+
+## 0.7.18
+
+- Enhanced draft review can run fact and presentation checks concurrently. The host merges exact-quote issues in draft order and uses the joined verdict for publication and ledger reconciliation.
+
+## 0.7.17
+
+- Draft reviewers can use independent pre-turn evidence to check factual claims made in dialogue. Current-turn reports of speech supply speech evidence.
+- Event presentation anchors travel with the writer’s draft. The reviewer returns only `pass` and `issues`, and the host reconciles event status against the final published text.
+
+## 0.7.16
+
+- Simulators can select evidence from the current material pack through a native tool enum. The host resolves each choice to the original evidence reference and checks its actor scope.
+- Opted-in draft review selects numbered prose passages for ledger presentation. The host binds unique exact matches, resolves the references back to original text, and verifies them against the publication.
+
+## 0.7.15
+
+- Opted-in adjudication can prepare independent outcomes at dispatch and submit only changed world fields after the clerk returns.
+- Enhanced draft review links current adjudicated events with exact prose excerpts. Publication derives their presentation status from the final text within the existing turn transaction.
+
+## 0.7.14
+
+- Opted-in simulation submissions expose a typed tool contract, normalize empty departure fields, and repair the observed extra closing brace on an otherwise valid submission before the native parser.
+- Focused adjudication forwards visible current scene cues alongside the existing midpoint facts, without turning an ongoing process into a completed event.
+- Direct draft review checks the factual premises of character dialogue and may inspect directly linked, already presented evidence under the existing permissions.
+
+## 0.7.13
+
+- Opted-in adjudicators start a regular decision with the current handoff, scene evidence and objective state. They can retrieve their authorized originals on demand.
+- Opted-in draft reviewers submit only `pass` and `issues`. The enhanced preset guides one complete pass with a focused follow-up on concrete doubts.
+
+## 0.7.12
+
+- Opted-in simulation members receive a per-character list of valid grounds, including qualified references to visible self records. Submission checks those references before a remote review or staged state write. A character's self-description does not count as a historical precedent.
+
+## 0.7.11
+
+- The 「经历」 turn tools register the user's stimulus and start the clerk in one call. World outcomes and their ordered event appends are validated with the final handoff and staged in one batch.
+- The optional single-character clerk path dispatches the selected pack, runs configured simulation review and retry, and forwards the accepted result without repackaging. Rejected simulation writes never enter the journal.
+- The enhanced preset recovers a complete narrator draft that stops without using the review tool. The host sends the original draft to the configured reviewer and preserves its existing revision and publication rules.
+
+## 0.7.10
+
+- Members may opt in to ordered tail appends. The host assigns each new record's index, even if other members update existing records in the same turn. Updates and archives still check collection versions.
+
+## 0.7.9
+
+- The 「经历」 provenance-aware chronicle accepts verified excerpts of published prose, keeps a typed batch contract, and rejects an exact event already present at the same story time.
+
+## 0.7.8
+
+- Scoped reviews receive only the current handoff and its authorized evidence, and submit a verdict through a single tool.
+- The 「经历」 preset can prepare world facts before adjudication and reuse authorized material prepared before the clerk handoff.
+- Chroniclers can submit event changes and summary updates as one atomic batch.
+
+## 0.7.7
+
+- 「经历」can opt into host-built material packs and one terminal simulation submission containing both the result and a batch of scoped state changes.
+- A timed-out simulation is interrupted before retry. Its handoff timer starts when the native activation binds.
+- Compact reviews preserve semantic checks and exact draft publication. The publisher can authorize publication of its original draft on approval.
+
+## 0.7.6
+
+- Await handoffs explicitly enabled for parallel execution can be sent together with `rp_team_request_many`. The caller uses one scheduler wait and receives an ordered result or error for each target.
+- Independent context, state, message and memory reads can run in the host's parallel tool batches.
+- A timed-out terminal reviewer with no state, draft, publication or external tool access releases its native turn so it cannot extend the wait for an available draft.
+
+## 0.7.5
+
+- Structured handoffs can declare `terminal: true`. A valid final result ends the target's model turn after the result is saved. Invalid results still return validation feedback to the target.
+- `rp_team_publish` can publish the exact approved text from a completed terminal handoff by reference.
+- Uses the same Windows host supplement as 0.7.4 on ElecKoi v0.3.0.
+
+## 0.7.4
+
+- A handoff can allow references with `references: true`. In data sent through it, and in the target's answer, a member may write `{"$ref": "ask-file#1"}` in place of a result it received or a request it sent earlier in the run. `pointer` takes one part of the data and `side: "request"` forwards the request instead of the result. The host substitutes the exact original before the selectors and schema run, so models no longer re-type long nested results. Each request is numbered `<handoffId>#<n>` per sender. Members that can write references receive each await result as `{ref, summary, data}`; other members still receive `{summary, data}`.
+- A reference that names nothing, has no result yet or whose pointer finds nothing is rejected as `RP_TEAM_HANDOFF_REF_INVALID`. The tool error lists the references the member can use. Used references are traced as `handoff.refs_resolved`.
+- When a handoff target fails, the requester no longer receives the target's raw model output. Upstream errors are cut before `Received arguments:`. Malformed tool arguments are reported as "Target X failed: its model produced malformed arguments for tool Y". Other messages are shortened to 400 characters. The request record, the trace and the member error keep the full text.
+- DSH `llm/retry` events in member Sessions are traced as `model.retry` with the retry count and error code.
+- The handoff editor has a "Forward verbatim" switch. Presets, portable presets and components that use references declare `minimumPluginVersion: 0.7.4`. Plugin 0.7.3 rejects them on import.
+- Uses the same host supplements as 0.7.2.
+
 ## 0.7.3
 
 - Each request hop adds one level of activation depth. Before, a hop was counted twice, so `maxDepth` 3 allowed only one hop and a chain such as A → B → C → D stopped before C. A requester resumed by a `resume` handoff runs again at its own depth instead of one level deeper.

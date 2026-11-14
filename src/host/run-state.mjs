@@ -75,8 +75,9 @@ export function stagePublication(run, agentId, publication) {
   if (agentId !== run.config.output.agentId) throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', 'Only the configured output agent may publish')
   const agent = run.config.agents.find(item => item.id === agentId)
   if (!agent?.outputAuthority.user) throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', 'The configured output agent has no user-facing output authority')
-  const body = String(publication?.body ?? '').trim()
-  if (!body) throw teamError('RP_TEAM_EMPTY_PUBLICATION', 'Publication body must not be empty')
+  const text = String(publication?.body ?? '')
+  if (!text.trim()) throw teamError('RP_TEAM_EMPTY_PUBLICATION', 'Publication body must not be empty')
+  const body = publication.preserveWhitespace ? text : text.trim()
   if (run.phase !== 'working' && run.phase !== 'composing' && run.phase !== 'publishing') {
     throw teamError('RP_TEAM_INVALID_PHASE', `Cannot publish while run is ${run.phase}`)
   }

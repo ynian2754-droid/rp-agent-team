@@ -72,6 +72,10 @@ function projectTraceData(type, data) {
       return pick(data, ['sessionId', 'provider', 'model', 'purpose', 'requestId', 'turn', 'step', 'stage', 'invocationId', 'requestCount', 'errorCode', 'cancelled'])
     case 'budget.exceeded':
       return pick(data, ['kind', 'code', 'message', 'limit', 'observed'])
+    case 'simulation.arguments_repaired':
+      return pick(data, ['sessionId'])
+    case 'world.close_prepared':
+      return pick(data, ['executionId', 'hasClerk', 'eventKeys', 'statePaths'])
     case 'activation.skipped':
     case 'activation.blocked':
       return pick(data, ['reason', 'dependencies', 'limit', 'depth'])
@@ -86,6 +90,10 @@ function projectTraceData(type, data) {
       return pick(data, ['sourceRunId', 'reason'])
     case 'context.selected':
       return { categories: strings(data.categories) }
+    case 'handoff.refs_resolved':
+      return pick(data, ['handoffId', 'direction', 'refs'])
+    case 'model.retry':
+      return pick(data, ['sessionId', 'turn', 'step', 'retry', 'maxRetries', 'delayMs', 'code'])
     case 'context.operation':
       return pick(data, ['operation', 'source'])
     case 'message.sent':
@@ -105,6 +113,13 @@ function projectTraceData(type, data) {
       return pick(data, ['status', 'selectedProposalCount', 'operationCount', 'bodyCharacters', 'productMessageId', 'receipt', 'reason', 'assistantSeq', 'assistantMessageId'])
     case 'publication.candidate':
       return pick(data, ['status', 'activation', 'bodyCharacters'])
+    case 'publication.draft_review_recovered':
+      return pick(data, ['sessionId', 'assistantSeq', 'bodyCharacters'])
+    case 'publication.draft_review_merged':
+      return { ...pick(data, ['requestId', 'batchId', 'pass', 'issues']),
+        lanes: (data.lanes ?? []).map(lane => pick(lane, ['requestId', 'ref', 'handoffId', 'status'])) }
+    case 'publication.ledger_reconciled':
+      return { events: (data.events ?? []).map(event => pick(event, ['event', 'from', 'shown'])) }
     case 'publication.delivered':
       return pick(data, ['bodyCharacters', 'sessionId', 'turn'])
     case 'publication.assistant_appended':

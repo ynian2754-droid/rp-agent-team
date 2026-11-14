@@ -1,7 +1,7 @@
 import { React } from './react.js'
 import { t } from './i18n.js'
 import { drafts } from './client-state.js'
-import { editConfig, editParameterValue } from './draft-state.js'
+import { editConfig, editParameterValue, stableJson } from './draft-state.js'
 import { Field, More, Check } from './fields.jsx'
 import { TypedField } from './typed-field.jsx'
 import { ValueSchemaEditor } from './value-schema-editor.jsx'
@@ -80,6 +80,7 @@ export function ParametersEditor({ conversationId, editor, options }) {
   }))
   let resolved, error = ''
   try { resolved = resolveAuthorParameters(config, editor.parameterValues) } catch (cause) { error = cause.message }
+  const hasStructure = parameters.some(parameter => parameter.options?.some(option => option.structure))
   return <section className="rp-team-block">
     <h3>{t('params.title')}</h3><p className="rp-team-note">{t('params.help')}</p>
     {groupParameters(parameters).map(({ group, items }) => {
@@ -94,6 +95,7 @@ export function ParametersEditor({ conversationId, editor, options }) {
       return group ? <fieldset className="rp-team-group rp-team-param-group" key={`group:${group}`}><legend>{group}</legend>{rows}</fieldset> : <React.Fragment key="ungrouped">{rows}</React.Fragment>
     })}
     {!parameters.length ? <p className="rp-team-note">{t('params.empty')}</p> : null}
+    {hasStructure && resolved ? <ResolvedStructure template={config} resolved={resolved} /> : null}
     {error ? <p className="rp-team-callout is-error">{error}</p> : resolved?.changes.length ? <More summary={t('params.changes')}><ValueView value={resolved.changes} /></More> : null}
     <More summary={t('params.author')}>
       <p className="rp-team-note">{t('params.authorHelp')}</p>
@@ -104,7 +106,7 @@ export function ParametersEditor({ conversationId, editor, options }) {
           <Field label={t('description')}><textarea rows={2} value={parameter.description || ''} onChange={event => edit(parameter.id, { description: event.target.value })} /></Field>
           <Field label={t('params.type')}><select value={parameter.type} onChange={event => edit(parameter.id, { type: event.target.value, default: initial(event.target.value), options: event.target.value === 'choice' ? [] : undefined, textOn: undefined, textOff: undefined, valueSchema: undefined,
             bindings: TEXT_TYPES.includes(event.target.value) ? parameter.bindings : (parameter.bindings || []).filter(binding => binding.mode !== 'text') })}>{TYPES.map(type => <option key={type} value={type}>{t(`params.types.${type}`)}</option>)}</select></Field>
-          {parameter.type === 'choice' ? <ChoiceOptions parameter={parameter} onChange={options => edit(parameter.id, { options })} bufferKey={`${conversationId}/param-options/${parameter.id}`} onInvalid={value => invalid(`param-options-${parameter.id}`, value)} /> : null}
+          {parameter.type === 'choice' ? <ChoiceOptions parameter={parameter} config={config} onChange={options => edit(parameter.id, { options })} bufferKey={`${conversationId}/param-options/${parameter.id}`} onInvalid={value => invalid(`param-options-${parameter.id}`, value)} /> : null}
           {parameter.type === 'boolean' ? <>
             <Field label={t('params.textOn')} hint={t('params.switchTextHint')}><textarea rows={2} value={parameter.textOn ?? ''} onChange={event => edit(parameter.id, { textOn: event.target.value })} /></Field>
             <Field label={t('params.textOff')} hint={t('params.switchTextHint')}><textarea rows={2} value={parameter.textOff ?? ''} onChange={event => edit(parameter.id, { textOff: event.target.value })} /></Field>
@@ -121,14 +123,89 @@ export function ParametersEditor({ conversationId, editor, options }) {
   </section>
 }
 
-function ChoiceOptions({ parameter, onChange, bufferKey, onInvalid }) {
+function ResolvedStructure({ template, resolved }) {
+  const effective = resolved.config
+  const activeIds = new Set(effective.agents.map(agent => agent.id))
+  const excluded = template.agents.filter(agent => !activeIds.has(agent.id))
+  const replacedPrompts = new Set((template.authorParameters || []).flatMap(parameter => {
+    const selected = parameter.options?.find(option => stableJson(option.value) === stableJson(resolved.values[parameter.id]))
+    return Object.keys(selected?.structure?.prompts ?? {})
+  }))
+  return <fieldset className="rp-team-group rp-team-param-group">
+    <legend>{t('params.structure.roster')}</legend>
+    <ul>
+      {effective.agents.map(agent => <li key={agent.id}>{agent.name}
+        {replacedPrompts.has(agent.id) ? <> · <small>{t('params.structure.promptChanged')}</small></> : null}
+      </li>)}
+    </ul>
+    {excluded.length ? <p className="rp-team-note">{t('params.structure.inactive', { names: excluded.map(agent => agent.name).join(' · ') })}</p> : null}
+  </fieldset>
+}
+
+function ChoiceOptions({ parameter, config, onChange, bufferKey, onInvalid }) {
   const options = parameter.options || []
+  const editOption = (index, change) => onChange(options.map((row, i) => i === index ? { ...row, ...change } : row))
   return <div>{options.map((item, index) => <div className="rp-team-author-card-body" key={index}>
-    <Field label={t('params.optionName')}><input value={item.label} onChange={event => onChange(options.map((row, i) => i === index ? { ...row, label: event.target.value } : row))} /></Field>
-    <TypedField value={item.value} bufferKey={`${bufferKey}/${index}`} onChange={value => onChange(options.map((row, i) => i === index ? { ...row, value } : row))} onInvalid={onInvalid} />
-    <Field label={t('params.optionText')} hint={t('params.optionTextHint')}><textarea rows={2} value={item.text ?? ''} onChange={event => onChange(options.map((row, i) => i === index ? { ...row, text: event.target.value } : row))} /></Field>
+    <Field label={t('params.optionName')}><input value={item.label} onChange={event => editOption(index, { label: event.target.value })} /></Field>
+    <TypedField value={item.value} bufferKey={`${bufferKey}/${index}`} onChange={value => editOption(index, { value })} onInvalid={onInvalid} />
+    <Field label={t('params.optionText')} hint={t('params.optionTextHint')}><textarea rows={2} value={item.text ?? ''} onChange={event => editOption(index, { text: event.target.value })} /></Field>
+    <ChoiceStructure config={config} structure={item.structure} onChange={structure => editOption(index, { structure })} />
     <button type="button" className="rp-team-quiet" onClick={() => onChange(options.filter((_, i) => i !== index))}>{t('remove')}</button>
   </div>)}<button type="button" className="rp-team-quiet" onClick={() => onChange([...options, { label: t('params.optionName'), value: '', ...(insertsText(parameter) ? { text: '' } : {}) }])}>{t('params.addOption')}</button></div>
+}
+
+function ChoiceStructure({ config, structure, onChange }) {
+  const excluded = new Set(structure?.excludeAgents || [])
+  const prompts = structure?.prompts || {}
+  const agents = new Map(config.agents.map(agent => [agent.id, agent]))
+  const update = (excludedIds, replacements) => onChange(excludedIds.size || Object.keys(replacements).length ? {
+    ...(excludedIds.size ? { excludeAgents: [...excludedIds] } : {}),
+    ...(Object.keys(replacements).length ? { prompts: replacements } : {})
+  } : undefined)
+  const setPrompt = (agentId, text) => update(excluded, { ...prompts, [agentId]: text })
+  const removePrompt = agentId => {
+    const next = { ...prompts }
+    delete next[agentId]
+    update(excluded, next)
+  }
+  const setExcluded = (agentId, checked) => {
+    const next = new Set(excluded)
+    const replacements = { ...prompts }
+    if (checked) {
+      next.add(agentId)
+      delete replacements[agentId]
+    } else next.delete(agentId)
+    update(next, replacements)
+  }
+  const available = config.agents.filter(agent => !excluded.has(agent.id) && !Object.hasOwn(prompts, agent.id))
+  const missing = [...excluded].filter(agentId => !agents.has(agentId))
+  return <More summary={t('params.structure.option')}>
+    <fieldset className="rp-team-group">
+      <legend>{t('params.structure.exclude')}</legend>
+      {config.agents.map(agent => <Check key={agent.id} label={agent.name} checked={excluded.has(agent.id)}
+        hint={agent.id === config.output.agentId ? t('params.structure.publisher') : undefined}
+        disabled={agent.id === config.output.agentId && !excluded.has(agent.id)} onChange={checked => setExcluded(agent.id, checked)} />)}
+      {missing.map(agentId => <Check key={agentId} label={t('originalReference', { id: agentId })} checked onChange={checked => setExcluded(agentId, checked)} />)}
+    </fieldset>
+    <fieldset className="rp-team-group">
+      <legend>{t('params.structure.prompts')}</legend>
+      {Object.entries(prompts).map(([agentId, prompt]) => <div key={agentId}>
+        <Field label={agents.get(agentId)?.name ?? t('originalReference', { id: agentId })}>
+          <textarea rows={6} value={prompt} onChange={event => setPrompt(agentId, event.target.value)} />
+        </Field>
+        <button type="button" className="rp-team-link" onClick={() => removePrompt(agentId)}>{t('params.structure.removePrompt')}</button>
+      </div>)}
+      {available.length ? <Field label={t('params.structure.addPrompt')}>
+        <select value="" onChange={event => {
+          const agent = agents.get(event.target.value)
+          if (agent) setPrompt(agent.id, agent.systemPrompt)
+        }}>
+          <option value="">{t('choose')}</option>
+          {available.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+        </select>
+      </Field> : null}
+    </fieldset>
+  </More>
 }
 
 function BindingEditor({ parameter, config, onChange }) {

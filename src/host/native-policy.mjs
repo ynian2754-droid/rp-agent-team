@@ -11,11 +11,12 @@ export function isHostProductTool(name) { return name?.startsWith('eleckoi_') ||
 
 /** Applied to primary, nested and restored Agent scopes, even when no product
  * schema is present yet. Trusted external tools never grant product access. */
-export function restrictMemberTools(agentCtx, { member, rootGroups, productDisabled, scheduled }) {
+export function restrictMemberTools(agentCtx, { member, rootGroups, productDisabled, scheduled, submitOnly }) {
   const allowed = allowedGroupsForAgent(member, rootGroups, productDisabled)
   const isDenied = declaration => {
     const name = declaration?.name ?? declaration?.function?.name ?? ''
     if (!name) return false
+    if (submitOnly) return name !== 'rp_team_submit_internal'
     if (name.startsWith('rp_team_')) return !scheduled
     if (isHostProductTool(name)) return true
     return !allowed.has(capabilityForDeclaration(declaration))

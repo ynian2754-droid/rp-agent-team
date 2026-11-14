@@ -1,6 +1,6 @@
 import { React } from './react.js'
 import { t } from './i18n.js'
-import { Field, More } from './fields.jsx'
+import { Check, Field, More } from './fields.jsx'
 import { ValueSchemaEditor } from './value-schema-editor.jsx'
 import { PathPicker } from './path-picker.jsx'
 
@@ -22,10 +22,13 @@ export function HandoffEditor({ member, config, edit, conversationId, setInvalid
       <summary>{t('author.handoffNumber', { n: index + 1 })} · {config.agents.find(agent => agent.id === item.to)?.name || item.to}</summary>
       <div className="rp-team-author-card-body">
         <Field label={t('author.handoffTarget')}><select value={item.to} onChange={event => update(item.id, { to: event.target.value })}>{config.agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></Field>
-        <Field label={t('author.continueMode')}><select value={item.mode} onChange={event => update(item.id, { mode: event.target.value })}>{['notify', 'await', 'resume'].map(mode => <option key={mode} value={mode}>{t(`author.mode.${mode}`)}</option>)}</select></Field>
+        <Field label={t('author.continueMode')}><select value={item.mode} onChange={event => update(item.id, { mode: event.target.value, ...(event.target.value === 'notify' ? { terminal: undefined } : {}), ...(event.target.value !== 'await' ? { parallel: undefined } : {}) })}>{['notify', 'await', 'resume'].map(mode => <option key={mode} value={mode}>{t(`author.mode.${mode}`)}</option>)}</select></Field>
         <p className="rp-team-note">{t(`author.modeHint.${item.mode}`)}</p>
         {item.mode !== 'notify' ? <Field label={t('author.waitSeconds')}><input type="number" min="1" value={(item.timeoutMs || 300000) / 1000} onChange={event => update(item.id, { timeoutMs: Number(event.target.value) * 1000 })} /></Field> : null}
         <Field label={t('author.handoffFailure')}><select value={item.onFailure || 'return_error'} onChange={event => update(item.id, { onFailure: event.target.value })}><option value="return_error">{t('author.returnError')}</option><option value="stop">{t('author.stopRun')}</option></select></Field>
+        <Check label={t('author.handoffReferences')} hint={t('author.handoffReferencesHelp')} checked={item.references === true} onChange={checked => update(item.id, { references: checked ? true : undefined })} />
+        {item.mode !== 'notify' ? <Check label={t('author.handoffTerminal')} hint={t('author.handoffTerminalHelp')} checked={item.terminal === true} onChange={checked => update(item.id, { terminal: checked ? true : undefined, ...(checked && !item.responseSchema ? { responseSchema: { type: 'any' } } : {}) })} /> : null}
+        {item.mode === 'await' ? <Check label={t('author.handoffParallel')} hint={t('author.handoffParallelHelp')} checked={item.parallel === true} onChange={checked => update(item.id, { parallel: checked ? true : undefined })} /> : null}
         {(item.mode === 'notify' ? ['request'] : ['request', 'response']).map(direction => <More key={direction} summary={t(`author.${direction}Rules`)}>
           <ValueSchemaEditor value={item[`${direction}Schema`] || { type: 'any' }} bufferKey={`${conversationId}/${member.id}/${item.id}/${direction}`} onChange={schema => update(item.id, { [`${direction}Schema`]: schema })}
             onInvalid={(key, invalid) => setInvalid?.(`handoff-${item.id}-${key}`, invalid)} />

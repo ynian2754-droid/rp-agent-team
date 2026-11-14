@@ -2,13 +2,13 @@
 
 **Build configurable character cognition teams for roleplay.** Give each agent its own knowledge, memory, model, tools, triggers and authority, then let the team produce one reply inside the normal ElecKoi chat.
 
-Version **0.7.3** supports the ElecKoi v0.2.21 Windows host and follows its live variable paths. It fixes request chains that stopped one hop short of `maxDepth`, checks a handoff result when the member submits it, and reports every problem of a rejected write or result at once. Members use permission-checked Team context, search, attachment and state tools. Rehearsal, prompt parameters, event triggers, memory, budgets and grouped native trajectories are available in the team workspace. [Runtime contract](docs/adaptation-0.5.0/CONTRACT.md) · [Installation guide](docs/install-guide.zh-CN.md)
+Version **0.7.19** supports the ElecKoi v0.3.0 Windows host through its matching supplement. An author option can select the active roster and replace full member prompts before the turn starts. The 「经历」 enhanced preset uses host-built material packets, batched simulation and world-state submissions, and two parallel draft reviews. The host derives event presentation from the final published text. [Release notes](CHANGELOG.md) · [Runtime contract](docs/adaptation-0.5.0/CONTRACT.md) · [Installation guide](docs/install-guide.zh-CN.md)
 
-The target is the Windows x64 build source of ElecKoi `0.2.21` at [`924e30a`](https://github.com/eleckoi/ElecKoi/commit/924e30aa6d22b45cea67a4376843764e25b94657), with DSH `0.2.2-rc.1`. Apply the matching host supplement for transactional turn state, durable receipts, archive identity mapping, headless rehearsal and public trajectory components.
+The Windows x64 target is ElecKoi `0.3.0` at `b0f4a5d`, with DSH `0.2.2-rc.1`. Apply the matching host supplement for transactional turn state, durable receipts, archive identity mapping, headless rehearsal and public trajectory components. [Windows source](https://github.com/eleckoi/ElecKoi/commit/b0f4a5dada412acb595d58678c7f468fec866eb0) · [Compatibility](COMPATIBILITY.md)
 
 ## Install
 
-1. Download the plugin archive and the matching Windows host supplement from [the releases page](https://github.com/ynian2754-droid/rp-agent-team/releases), or build the archive locally with `pnpm pack:dshbundle`. Plugin 0.7.3 uses the 0.7.2 host supplement.
+1. Download the [0.7.19 release archive](https://github.com/ynian2754-droid/rp-agent-team/releases/tag/v0.7.19) or build it locally with `pnpm pack:dshbundle`. Select the patch for your Windows host from the [host supplement table](host-patch/README.md).
 2. Follow [Install and upgrade](docs/install-guide.zh-CN.md) to patch the supported ElecKoi source, build it and import the archive through the DSH plugin manager.
 3. Open a roleplay chat and enable **角色团队** in the composer. Disable it any time to return to ordinary chat on the next turn.
 

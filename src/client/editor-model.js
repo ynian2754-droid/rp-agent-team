@@ -1,4 +1,5 @@
 import { createAgent } from '../shared/schema.mjs'
+import { resolveAuthorParameters, usesParameterStructure } from '../shared/author-parameters.mjs'
 
 export const STATE_ACCESS = ['none', 'read', 'write', 'readwrite']
 export const COMMUNICATION_KEYS = ['sendTo', 'receiveFrom', 'requestTo', 'requestFrom']
@@ -203,6 +204,9 @@ export function communicationGaps(config, member) {
   }
 }
 
-export function manualMembers(config) {
-  return config?.agents?.filter(agent => agent.triggers.some(trigger => trigger.type === 'manual')) || []
+export function manualMembers(config, parameterValues) {
+  const members = usesParameterStructure(config?.authorParameters)
+    ? resolveAuthorParameters(config, parameterValues).config.agents
+    : config?.agents ?? []
+  return members.filter(agent => agent.triggers.some(trigger => trigger.type === 'manual'))
 }

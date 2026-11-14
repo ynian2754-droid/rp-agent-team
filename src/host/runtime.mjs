@@ -2,6 +2,7 @@ import { registerExecutionSession, finishExecutionSession, traceAssociation, obs
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
   applySavedRunFields, conversationTraceDirectory as conversationTraceDirectoryPath, fingerprint, manualSelectionPath,
   persistedRunValue, readOptionalJson, readRunRecordFile,
@@ -16,14 +17,24 @@ import {
 } from './run-state.mjs'
 import { TeamConfigStore } from './config-store.mjs'
 import { StateStore, describeStateToolAccess, projectStateValueForAgent } from './state-store.mjs'
+import { normalizeSimulationSubmitStream, simulationParameters, simulationTargets } from './lived-history-simulation.mjs'
+import { restoreSimulationGroundRefs, simulationGroundChoiceIds } from './lived-history-sim-evidence.mjs'
+import { finishSingleGroupClerk } from './lived-history-clerk-turn.mjs'
+import { prepareLivedHistoryWorldClose, prepareLivedHistoryWorldStart, prepareLivedHistoryWorldSubmission,
+  validateLivedHistoryWorldBackground } from './lived-history-world-turn.mjs'
 import { createScheduler } from './scheduler.mjs'
-import { createCommunication } from './communication.mjs'
+import { createCommunication, parallelDraftReviewPeer } from './communication.mjs'
 import { buildAgentContext, draftVisibleTo } from './context-policy.mjs'
 import { actualTokenUsage, createTrace, recordTrace, traceSummary } from './trace.mjs'
 import { disposeRegisteredAgentPresets, resolveAgentModel, resolveAgentPreset, restoreRegisteredAgentPreset, validateAgentModelRoutes } from './agent-composition.mjs'
 import { registerTeamTools } from './team-tools.mjs'
 import { registerMemoryTools } from './memory-tools.mjs'
+import { enforceSimulationReview, validateScopedReviewVerdict, validateSimulationEvidence } from './lived-history-review.mjs'
+import { bindWriterPresentation, publicationLedgerTargets, resolveDraftPassageProofs, validateDraftPresentation, worldPublicationOutcomes,
+  writerPresentationCandidates } from './lived-history-publication.mjs'
+import { createChronicleSource, chronicleTargets } from './lived-history-chronicle.mjs'
 import { registerContextTools } from './context-tools.mjs'
+import { buildLivedHistoryPack, livedHistoryPackLog } from './lived-history-pack.mjs'
 import { resolveAuthorParameters } from '../shared/author-parameters.mjs'
 import {
   committedTriggerCooldowns, createTriggerTracker, latestCommittedStateCheckpoint, stateChangesFromCheckpoint
@@ -183,7 +194,7 @@ export function createRpAgentTeam(ctx, dependencies) {
       const resolved = resolveAuthorParameters(normalized, valuesForResolution)
       await validateAgentModelRoutes(resolved.config, ctx.llm)
       const saved = store.save({ conversationId, expectedRevision, enabled, config: normalized, parameterValues })
-      pruneManualSelection(conversationId, normalized)
+      pruneManualSelection(conversationId, resolved.config)
       return saved
     },
     getOptions: ({ conversationId }) => getOptions(conversationId),
@@ -222,7 +233,15 @@ export function createRpAgentTeam(ctx, dependencies) {
       ctx.on('llm/stream', (options, next) => {
         const run = runForSession(options?.sessionId)
         if (run) captureModelInput(run, options)
-        return guardTeamModelRequest(options, next)
+        const stream = guardTeamModelRequest(options, next)
+        const binding = childBindings.get(String(options?.sessionId ?? ''))
+        const member = binding?.simulation && run && agentById(run.config, binding.agentId)
+        if ((!member?.execution?.livedHistoryTypedSimulation && !binding?.simulationSubmitParameters) ||
+          ['session-title', 'compaction'].includes(options?.purpose)) return stream
+        return normalizeSimulationSubmitStream(stream, { signal: options.signal, parameters: binding.simulationSubmitParameters, onRepair: () => {
+          record(run, { type: 'simulation.arguments_repaired', agentId: member.id, data: { sessionId: binding.sessionId } })
+          persistRun(run)
+        } })
       })
     ]
     uninstallNativeHooks = () => {
@@ -411,8 +430,13 @@ export function createRpAgentTeam(ctx, dependencies) {
           text: childPolicy(member, run, binding.activation, run.pendingChildren)
         }))
         disposers.push(registerTools(agentCtx, member, run, sessionId))
+        const review = member.execution.recoverSkippedDraftReview && member.id === run.outputAgentId
+          && member.outputAuthority.internal && member.outputAuthority.user && member.communication.handoffs?.find(rule =>
+            rule.id === 'check-draft' && rule.mode === 'await' && rule.autoPublish && rule.scopedReview && rule.compactReview === 'draft')
+        if (review) disposers.push(agentCtx.on('agent/turn-stopping', event => recoverSkippedDraftReview(run, member, childBinding, review, event)))
       }
-      disposers.push(await restrictAgentCapabilities(agentCtx, member, run, agent.session.header ?? {}, scheduled))
+      const submitOnly = childBinding?.simulation || childBinding?.scopedReview || childBinding?.chronicle
+      disposers.push(await restrictAgentCapabilities(agentCtx, member, run, agent.session.header ?? {}, scheduled, submitOnly))
       record(run, { type: 'session.scope_installed', agentId: member.id, data: { sessionId, scheduled } })
       persistRun(run)
     }
@@ -487,10 +511,10 @@ export function createRpAgentTeam(ctx, dependencies) {
       mountedPresetId: ctx.agentPresets.composedPreset(agent.ctx)
     }
   }
-  async function restrictAgentCapabilities(agentCtx, member, run, snapshot, scheduled) {
+  async function restrictAgentCapabilities(agentCtx, member, run, snapshot, scheduled, submitOnly) {
     return restrictMemberTools(agentCtx, {
       member, rootGroups: run.rootAvailableGroups, productDisabled: run.productDisabledGroups,
-      scheduled
+      scheduled, submitOnly
     })
   }
 
@@ -664,6 +688,19 @@ export function createRpAgentTeam(ctx, dependencies) {
     run.initialStateChanges = initialStateChanges(run)
     run.communication = createCommunication(run.config, {
       run,
+      onWriterPresentation: ({ writer, world, draft, presentation }) =>
+        bindWriterPresentation(writerPresentationCandidates(run, writer, stateStore, world), draft, presentation),
+      onMaterialPack: ({ from, to, executionId, data }) => {
+        const source = [...run.pendingChildren.values()].find(child => child.agentId === from && child.executionId === executionId)?.packSource
+        if (!source) throw teamError('RP_TEAM_MATERIAL_PACK_INVALID', 'This activation does not own a material selection')
+        const rows = run.handoffRequests.filter(row => row.sourceExecutionId === executionId && row.materialPack)
+        const execution = agentById(run.config, to)?.execution
+        const pack = buildLivedHistoryPack(source, data, rows, {
+          groundRefs: execution?.livedHistoryGroundRefs === true, groundChoices: execution?.livedHistoryGroundChoices === true
+        })
+        if (to !== `sim-${pack.slot}`) throw teamError('RP_TEAM_MATERIAL_PACK_INVALID', 'Material slot does not match its target')
+        return pack
+      },
       onRequest: async activation => run.scheduler?.requestActivation(activation),
       onMessage: async message => run.scheduler?.notifyMessage(message),
       onAwait: ({ from, requestId, promise }) => run.scheduler.waitForHandoff({ agentId: from, requestId, promise }),
@@ -673,7 +710,10 @@ export function createRpAgentTeam(ctx, dependencies) {
         return run.scheduler?.settleResumeReservation(requestId, 'target', true)
       },
       onFailure: ({ request, error }) => run.scheduler?.stop(error, request.from),
-      onCancelTarget: ({ requestId, error }) => run.scheduler?.cancelRequestActivation(requestId, error),
+      onCancelTarget: ({ requestId, request, error }) => {
+        if (!request.targetExecutionId) return run.scheduler?.cancelRequestActivation(requestId, error)
+        if (error?.code === 'RP_TEAM_HANDOFF_TIMEOUT') interruptExpiredReviewer(run, request)
+      },
       onTrace: event => record(run, event),
       onChange: async () => { await run.scheduler?.notify(); persistRun(run) },
       onPersistRequests: () => persistRun(run),
@@ -729,6 +769,7 @@ export function createRpAgentTeam(ctx, dependencies) {
           controller?.abort(error?.message ?? 'A required RP Team agent failed')
         }
         interruptChildren(run)
+        await run.communication?.cancelAll(error)
       },
       onActivate: activation => activateAgent(run, activation),
       onActivationTerminal: async ({ agent, activation, status, error }) => {
@@ -1231,12 +1272,20 @@ export function createRpAgentTeam(ctx, dependencies) {
     const allowedGroups = allowedGroupsForAgent(agent, run.rootAvailableGroups, run.productDisabledGroups)
     const activationKey = fingerprint(`${run.runId}\u0000${agent.id}`).slice(0, 24)
     const marker = `rp-agent-team-activation:${activationKey}:${activationNo}`
-    const childData = createChildContextData({ run, agent, stateStore })
+    const childData = createChildContextData({ run, agent, stateStore, activation })
+    const chroniclePhase = agent.execution.livedHistoryPhase
+    const chronicleSource = ['chronicle', 'chronicleProvenance'].includes(chroniclePhase)
+      ? createChronicleSource({ run, agent, stateStore }) : undefined
+    if (chronicleSource) {
+      childData.agentContext.sources.chronicle_material = chronicleSource.context
+      if (chroniclePhase === 'chronicleProvenance') chronicleSource.publishedSources = childData.chronicleSources ?? []
+    }
+    const simulation = run.communication.getRequest(activation.requestId)?.simulation === true
     run.pendingChildren.set(marker, {
       marker, agentId: agent.id, activationNo, activation, route, presetId,
       activationState: childData.activationState,
       activationVersions: childData.activationVersions,
-      rootGroups: run.rootAvailableGroups, allowedGroups, ...childData
+      rootGroups: run.rootAvailableGroups, allowedGroups, simulation, chronicleSource, ...childData
     })
     const waiter = deferred()
     // A native child may finish while spawnTeammate is still resolving.
@@ -1322,7 +1371,8 @@ export function createRpAgentTeam(ctx, dependencies) {
       executionId: execution.executionId, depth: pending.activation.depth,
       // The handoff this execution answers; a resumed requester carries the request it made, not one it answers.
       ...(pending.activation.requestId && !pending.activation.resumeFromRequestId ? { requestId: pending.activation.requestId } : {}),
-      sessionId: session, marker, name, route: structuredClone(pending.route), presetId: pending.presetId
+      sessionId: session, marker, name, simulation: pending.simulation, scopedReview: pending.scopedReview,
+      chronicle: Boolean(pending.chronicleSource), route: structuredClone(pending.route), presetId: pending.presetId
     }
     if (!run.childSessionIds.includes(session)) run.childSessionIds.push(session)
     childBindings.set(session, binding)
@@ -1417,6 +1467,16 @@ export function createRpAgentTeam(ctx, dependencies) {
     if (!run || activeRunBySession.get(run.rootSessionId) !== run.runId) return
     const usage = actualTokenUsage(event)
     if (usage) captureUsage(run, binding, event, usage)
+    if (event.type === 'llm/retry') {
+      // DSH is repeating a failed model step (for example malformed tool arguments, when the provider's
+      // retryPolicy allows it); the failed attempt ran no tools. Record it so a run shows why it took longer.
+      const data = event.data ?? {}
+      record(run, { type: 'model.retry', agentId: binding.agentId, data: {
+        sessionId, turn: data.turn, step: data.step, retry: data.retry, maxRetries: data.maxRetries,
+        delayMs: data.delayMs, code: data.failure?.code
+      } })
+      persistRun(run)
+    }
     if (event.type === 'turn/end') {
       latestStepBySession.delete(sessionId)
       finishExecutionSession(run, sessionId, event.data?.reason?.kind === 'aborted' ? 'cancelled' : childTurnEndError(event.data ?? {}) ? 'failed' : 'complete', event.seq)
@@ -1543,6 +1603,29 @@ export function createRpAgentTeam(ctx, dependencies) {
     return runStatus(run)
   }
 
+  function interruptExpiredReviewer(run, request) {
+    if (request.mode !== 'await' || !request.terminal) return
+    const member = agentById(run.config, request.to)
+    const { draft, state, user } = member.outputAuthority
+    if (!request.simulation && (draft || state || user || member.execution.onFailure === 'stop' || member.communication.requestTo.length ||
+        member.execution.trustedTools.length || member.capabilities.some(capability => capability.enabled))) return
+    const canTriggerWork = !request.simulation && run.config.agents.some(target =>
+      allows(member.communication.sendTo, target.id) && allows(target.communication.receiveFrom, member.id) &&
+      target.triggers.some(trigger => trigger.type === 'message_received' &&
+        (!trigger.from?.length || allows(trigger.from, member.id))))
+    if (canTriggerWork) return
+    const binding = [...childBindings.values()].find(child => child.runId === run.runId &&
+      child.requestId === request.requestId && child.executionId === request.targetExecutionId)
+    const root = ctx.agents.get(run.rootSessionId)
+    if (!binding || !root) return
+    try {
+      ctx.agentTeams.interrupt(root, binding.name)
+    } catch {
+      return // The child may have ended while the timeout was being recorded.
+    }
+    record(run, { type: 'handoff.target_interrupted', agentId: request.to, data: { requestId: request.requestId } })
+  }
+
   function interruptChildren(run) {
     const root = ctx.agents.get(run.rootSessionId)
     if (!root) return
@@ -1617,9 +1700,36 @@ export function createRpAgentTeam(ctx, dependencies) {
     return receipt
   }
 
+  function finishMaterialPack(run, member, binding, data) {
+    const source = run.pendingChildren.get(binding?.marker)?.packSource
+    if (!source) return
+    const rows = run.handoffRequests.filter(row => row.sourceExecutionId === binding.executionId && row.materialPack)
+    const update = livedHistoryPackLog(source, rows, data?.relays ?? 0)
+    if (!update) return
+    const target = { conversationId: run.conversationId, runId: run.runId, agentId: member.id, ...update }
+    const before = observeStatePath(stateStore, run, target.namespace, target.path)
+    stateStore.write(target)
+    run.stateTransaction = stateStore.status({ conversationId: run.conversationId, runId: run.runId })
+    record(run, { type: 'state.operation', agentId: member.id, data: {
+      namespace: target.namespace, path: target.path, operation: 'write',
+      version: stateStore.version(target).version, ...before, after: target.value, valuesRecorded: true
+    } })
+  }
+
   function registerTools(agentCtx, member, run, sessionId) {
+    const binding = childBindings.get(String(sessionId))
+    const { simulation, scopedReview, chronicle } = binding ?? {}
+    const incoming = scopedReview === 'draft' && run.communication.getRequest(binding.requestId)
+    if (simulation && member.execution.livedHistoryGroundChoices) {
+      const request = run.communication.getRequest(binding.requestId)
+      const choices = simulationGroundChoiceIds(request?.request.data)
+      if (choices.length) binding.simulationSubmitParameters = simulationParameters(choices)
+    }
+    const packSource = run.pendingChildren.get(binding?.marker)?.packSource
+    const singleGroup = member.execution.livedHistorySingleGroup && packSource?.present.length === 1
+    const worldTurn = member.execution.livedHistoryWorldTurn && run.communication.getRequest(binding?.requestId)?.request.data?.mode === '裁定'
     const args = {
-      agentCtx, defineTool, member, run, stateStore,
+      agentCtx, defineTool, member, run, stateStore, simulation, simulationSubmitParameters: binding?.simulationSubmitParameters, scopedReview, chronicle,
       assertActiveCaller: agent => assertActiveCaller(agent, run, member, sessionId),
       assertInternalAuthority: () => assertInternalAuthority(member),
       requestDepth: agent => childBindings.get(String(agent?.session?.id))?.depth ?? 0,
@@ -1628,12 +1738,107 @@ export function createRpAgentTeam(ctx, dependencies) {
       saveDraft: args => saveDraft(run, member, args),
       submitInternal: (args, exec) => submitInternal(run, member, args, exec),
       publish: (args, exec) => publishFromAgent(run, member, args, exec),
+      requestWithPublication: (args, exec) => requestWithPublication(run, member, args, exec),
+      requestWorldWithPresentation: member.execution.livedHistoryWriterPresentation && member.id === run.outputAgentId
+        ? (args, exec) => requestWorldWithPresentation(run, member, args, exec) : undefined,
+      writerPresentationReview: incoming?.writerPresentation !== undefined,
       captureStateBefore: (namespace, path) => run.captureStateBefore?.(namespace, path, member.id),
-      notifyStateChanged: run.notifyStateChanged
+      notifyStateChanged: run.notifyStateChanged,
+      singleGroup: singleGroup ? (args, exec) => runSingleGroupClerk(run, member, binding, packSource, args, exec) : undefined,
+      worldStart: worldTurn ? (args, exec) => startWorldTurn(run, member, binding, args, exec) : undefined,
+      worldSubmit: worldTurn ? (args, exec) => submitWorldTurn(run, member, binding, args, exec) : undefined
     }
+    if (simulation || scopedReview || chronicle || singleGroup) return registerTeamTools(args)
     const disposers = [registerTeamTools(args), registerContextTools({ ...args, attachments: ctx.attachments })]
-    if (run.config.memory?.collections?.length) disposers.push(registerMemoryTools(args))
+    if (run.config.memory?.collections?.length) disposers.push(registerMemoryTools({ ...args, worldTurn }))
     return () => { for (const dispose of disposers.reverse()) dispose?.() }
+  }
+
+  async function startWorldTurn(run, member, binding, args, exec) {
+    assertInternalAuthority(member)
+    if (!member.outputAuthority.state || binding.worldStarted) {
+      throw teamError('RP_TEAM_WORLD_START_INVALID', 'Start the adjudication handoff once per activation with state authority')
+    }
+    const failedAdjudications = new Set(member.execution.livedHistoryFocusedWorld ? run.handoffRequests
+      .filter(row => row.handoffId === 'ask-world' && row.to === member.id && row.status === 'failed' && row.request?.data?.mode === '裁定')
+      .map(row => row.targetExecutionId) : [])
+    const previousFiles = run.handoffRequests.filter(row => row.handoffId === 'ask-file' && row.from === member.id &&
+      failedAdjudications.has(row.sourceExecutionId))
+    const priorStimulus = previousFiles.flatMap(row => row.request?.data?.stimulus ?? [])
+    const { writes, independentWrites, data, stimulus } = prepareLivedHistoryWorldStart({ run, member, stateStore, args, priorStimulus })
+    const usePrepared = member.execution.livedHistoryPreparedWorldClose
+    const background = usePrepared && validateLivedHistoryWorldBackground({ run, member, stateStore, background: args.background })
+    function prepareClose() {
+      if (!usePrepared) return {}
+      const prepared = prepareLivedHistoryWorldClose({ run, member, stateStore, background })
+      binding.preparedWorldClose = prepared
+      record(run, { type: 'world.close_prepared', agentId: member.id, data: { ...prepared.summary,
+        executionId: binding.executionId, hasClerk: Boolean(data) } })
+      return { prepared: prepared.summary }
+    }
+    if (!data) {
+      const notifications = stageInternalWrites(run, member, [...writes, ...independentWrites])
+      binding.worldStarted = true
+      const close = prepareClose()
+      if (notifications.length) await run.notifyStateChanged(notifications)
+      return { stimulus, ...close }
+    }
+    const rule = member.communication.handoffs.find(rule => rule.id === 'ask-file')
+    const input = { from: member.id, to: rule?.to, handoffId: 'ask-file', data, summary: args.summary,
+      depth: binding.depth, executionId: binding.executionId }
+    run.communication.validateRequest(input)
+    const notifications = stageInternalWrites(run, member, [...writes, ...independentWrites])
+    binding.worldStarted = true
+    const reusable = previousFiles.findLast(row => row.status === 'completed' && stableJson(row.request.data) === stableJson(data))
+    if (reusable) {
+      run.communication.bindWorldReviewFile(binding.requestId, reusable.requestId, binding.executionId)
+      record(run, { type: 'handoff.target_reused', agentId: member.id, data: {
+        requestId: reusable.requestId, handoffId: reusable.handoffId, reusedFromRunId: run.runId,
+        reusedFromRequestId: reusable.requestId, sourceExecutionId: binding.executionId
+      } })
+      const close = prepareClose()
+      if (notifications.length) await run.notifyStateChanged(notifications)
+      return { ...structuredClone(reusable.result), ref: reusable.ref, stimulus, ...close }
+    }
+    const [result, close] = await Promise.all([
+      run.communication.request(input),
+      Promise.resolve().then(prepareClose),
+      notifications.length ? run.notifyStateChanged(notifications) : undefined
+    ])
+    exec.signal?.throwIfAborted()
+    return { ...result, stimulus, ...close }
+  }
+
+  function submitWorldTurn(run, member, binding, args, exec) {
+    if (!member.outputAuthority.state || !exec?.concludeTurn) {
+      throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', 'World batch requires state authority and an active terminal submission')
+    }
+    const { writes, data } = prepareLivedHistoryWorldSubmission({ run, member, stateStore, args, prepared: binding.preparedWorldClose })
+    return submitInternal(run, member, { summary: args.summary, data }, exec, writes)
+  }
+
+  async function runSingleGroupClerk(run, member, binding, source, args, exec) {
+    assertInternalAuthority(member)
+    if (binding.deferredSimulationWrites || !exec?.concludeTurn) {
+      throw teamError('RP_TEAM_CLERK_TURN_INVALID', 'The clerk pipeline requires one active terminal tool call')
+    }
+    const writesByRequest = new Map()
+    binding.deferredSimulationWrites = writesByRequest
+    const simulations = () => run.handoffRequests.filter(row => row.sourceExecutionId === binding.executionId && row.simulation)
+    try {
+      return await finishSingleGroupClerk({ source, member, args,
+        request: input => run.communication.request({ ...input, from: member.id, depth: binding.depth, executionId: binding.executionId }),
+        latestSimulation: () => simulations().at(-1),
+        acceptSimulation: ({ ref }) => {
+          const row = simulations().find(row => row.ref === ref && row.status === 'completed')
+          if (!row || !writesByRequest.has(row.requestId)) throw teamError('RP_TEAM_HANDOFF_FAILED', 'No accepted simulation writes for this handoff')
+          return writesByRequest.get(row.requestId)
+        },
+        submit: (args, accepted) => submitInternal(run, member, args, exec, [], accepted)
+      })
+    } finally {
+      delete binding.deferredSimulationWrites
+    }
   }
 
   async function saveDraft(run, member, args) {
@@ -1659,27 +1864,205 @@ export function createRpAgentTeam(ctx, dependencies) {
     return { draftId: draft.draftId, revision: draft.revision, visibleTo }
   }
 
-  async function submitInternal(run, member, args, exec) {
+  async function submitInternal(run, member, args, exec, batchWrites = [], acceptedSimulation) {
     if (!member.outputAuthority.internal) throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', `Agent ${member.id} has no internal-result authority`)
     const sessionId = String(exec?.agent?.session?.id ?? '')
     const executionId = run.executionSessions.find(row => row.sessionId === sessionId)?.executionId
     // Reject a result that breaks the incoming handoff's responseSchema now, listing every problem, instead of
     // failing the handoff after this execution has ended without a chance to fix it.
-    const answering = childBindings.get(sessionId)?.requestId
-    if (answering) run.communication?.checkTargetResult({ requestId: answering, agentId: member.id, result: { summary: args.summary, data: args.data } })
+    const binding = childBindings.get(sessionId)
+    const answering = binding?.requestId
+    const request = answering && run.communication.getRequest(answering)
+    const terminal = request?.terminal === true
+    if ((terminal || binding?.chronicle) && run.internalResults.some(item => item.agentId === member.id && item.executionId === executionId)) {
+      return { status: 'accepted' }
+    }
+    // A handoff that allows references lets the answer forward results this member received verbatim:
+    // expand them before the check, so the requester and the schema both see the exact originals.
+    const resolved = answering ? run.communication?.resolveAnswerRefs({ requestId: answering, agentId: member.id, data: args.data }) : undefined
+    const submitted = resolved ? resolved.data : args.data
+    if (request?.scopedReview) validateScopedReviewVerdict(request, submitted)
+    let publicationReview
+    if (request?.compactReview === 'draft' && request.writerPresentation === undefined &&
+      member.execution.livedHistoryDirectDraftReview && member.execution.livedHistoryReviewPresentation) {
+      const pending = run.pendingChildren.get(binding.marker)
+      const outcomes = pending?.agentContext?.sources?.review_outcomes
+      publicationReview = member.execution.livedHistoryPassageChoices
+        ? resolveDraftPassageProofs(pending?.draftPassages, args.presentation)
+        : validateDraftPresentation(outcomes, request.request.data.draft, args.presentation)
+    } else if (request?.handoffId === 'ask-world' && batchWrites.length &&
+      (agentById(run.config, request.from)?.execution?.livedHistoryWriterPresentation ||
+        run.config.agents.some(agent => agent.execution?.livedHistoryReviewPresentation))) {
+      publicationReview = { outcomeIds: worldPublicationOutcomes(batchWrites) }
+    }
+    let writes = batchWrites
+    let notifications = []
+    let data = enforceSimulationReview(submitted, request?.compactReview === 'simulation' ? request.request?.data?.precheck : undefined)
+    if (binding?.simulation) {
+      if (request?.status !== 'running' || request.targetExecutionId !== executionId || !exec?.concludeTurn) {
+        throw teamError('RP_TEAM_HANDOFF_FAILED', 'This simulation is no longer accepting a result')
+      }
+      const pending = run.pendingChildren.get(binding.marker)
+      writes = simulationTargets(request.request?.data, submitted, pending.activationVersions)
+      const pack = request.request.data
+      const beats = binding.simulationSubmitParameters ? restoreSimulationGroundRefs(pack, submitted.beats) : submitted.beats
+      if (member.execution.livedHistoryGroundRefs || binding.simulationSubmitParameters) validateSimulationEvidence(pack, beats)
+      if (writes.length && !member.outputAuthority.state) {
+        throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', 'This member has no state-write authority')
+      }
+      data = { beats: beats.map(beat => ({ ...beat,
+        wrote: writes.filter(item => item.person === beat.who).map(item => item.path)
+      })) }
+    }
+    if (binding?.chronicle) {
+      if (!member.outputAuthority.state || !exec?.concludeTurn) {
+        throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', 'Chronicle batch requires state authority and an active terminal submission')
+      }
+      const pending = run.pendingChildren.get(binding.marker)
+      writes = chronicleTargets({ source: pending.chronicleSource, data: submitted, run, agent: member, stateStore })
+      data = { changes: writes.length }
+    }
+    const validated = answering && run.communication.checkTargetResult({ requestId: answering, agentId: member.id, result: { summary: args.summary, data } })
+    if (terminal && !validated) throw teamError('RP_TEAM_HANDOFF_FAILED', 'This handoff is no longer accepting a result')
+    const sourceSession = binding?.simulation && run.executionSessions.find(row => row.executionId === request.sourceExecutionId)?.sessionId
+    const deferredWrites = sourceSession && childBindings.get(sourceSession)?.deferredSimulationWrites
+    if (deferredWrites) {
+      stateStore.writeBatch({ conversationId: run.conversationId, runId: run.runId, agentId: member.id, targets: writes, validateOnly: true })
+      deferredWrites.set(answering, { member, writes })
+    } else if (writes.length) notifications = stageInternalWrites(run, member, writes)
+    if (acceptedSimulation?.writes.length) {
+      notifications.push(...stageInternalWrites(run, acceptedSimulation.member, acceptedSimulation.writes))
+    }
+    if (terminal) finishMaterialPack(run, member, binding, data)
+    resolved?.trace()
     const item = { agentId: member.id, executionId, summary: args.summary,
-      data: args.data === undefined ? undefined : structuredClone(args.data), at: new Date().toISOString() }
+      data: data === undefined ? undefined : structuredClone(data), ...(publicationReview ? { publicationReview } : {}), at: new Date().toISOString() }
     run.internalResults.push(item)
     run.members[member.id].result = { summary: item.summary }
     record(run, { type: 'internal.submitted', agentId: member.id, data: { status: 'submitted' } })
     persistRun(run)
+    if ((terminal || binding?.chronicle) && exec?.concludeTurn) {
+      if (terminal) run.communication.sealTargetResult(answering)
+      exec.concludeTurn()
+    }
+    if (notifications.length) await run.notifyStateChanged(notifications)
     return { status: 'accepted' }
+  }
+
+  function stageInternalWrites(run, member, writes) {
+    if (!writes.length) return []
+    const before = writes.map(({ namespace, path }) => observeStatePath(stateStore, run, namespace, path))
+    const notifications = writes.flatMap(({ namespace, path }) => run.captureStateBefore(namespace, path, member.id))
+    const target = { conversationId: run.conversationId, runId: run.runId, agentId: member.id }
+    const accepted = stateStore.writeBatch({ ...target, targets: writes })
+    run.stateTransaction = stateStore.status(target)
+    for (const [index, { namespace, path, version }] of accepted.entries()) {
+      record(run, { type: 'state.operation', agentId: member.id, data: {
+        namespace, path, operation: writes[index].operation ?? 'write', version, ...before[index], after: writes[index].value, valuesRecorded: true
+      } })
+    }
+    persistRun(run)
+    return notifications
+  }
+
+  async function recoverSkippedDraftReview(run, member, binding, review, { agent, turn, signal }) {
+    if (run.publication || signal.aborted) return
+    const fromThisExecution = row => row.sourceExecutionId === binding.executionId && row.from === member.id
+    const isDraftReview = row => fromThisExecution(row) && row.handoffId === review.id
+    if (run.handoffRequests.some(isDraftReview)) return
+    const event = agent.session.snapshotEvents().findLast(item =>
+      item.type === 'assistant/message' && item.data?.turn === turn && isAppendedSurfaceEvent(item))
+    const message = sessionMessage(event)
+    const finish = event?.data.stream?.findLast(item => item.type === 'chunk' && item.chunk?.type === 'finish')
+    if (finish?.chunk.reason?.kind !== 'stop' || message?.role !== 'assistant' ||
+      (Array.isArray(message.content) && message.content.some(part => part.type === 'tool-call'))) return
+    const draft = assistantText(message)
+    if (!draft.trim()) return
+
+    const world = run.handoffRequests.findLast(row => fromThisExecution(row) && row.handoffId === 'ask-world' && row.status === 'completed')
+    record(run, { type: 'publication.draft_review_recovered', agentId: member.id, data: {
+      sessionId: binding.sessionId, assistantSeq: event.seq, bodyCharacters: draft.length
+    } })
+    let result
+    try {
+      result = await requestWithPublication(run, member, { to: review.to, handoffId: review.id,
+        data: { draft, world_return: world ? { $ref: world.ref } : {} }
+      }, { agent, signal })
+    } catch (error) {
+      // Only a failed dispatched review may use the preset's existing explicit publication fallback.
+      if (signal.aborted || review.onFailure !== 'return_error' ||
+        !run.handoffRequests.some(row => isDraftReview(row) && (row.status === 'failed' || row.mergedDraftReview?.incomplete))) throw error
+    }
+    if (run.publication) return
+    const text = result?.data?.pass === false
+      ? `宿主已补交刚才的正文，核验要求修改。仅按下列问题修一次，直接用 rp_team_publish 的 body 提交修订稿。\n${JSON.stringify(result.data.issues)}`
+      : '宿主补交了刚才的正文，但正文核验未返回。按预设用 rp_team_publish 的 body 提交刚才的原稿。'
+    agent.steer(createUserMessage({ content: [{ type: 'text', text }],
+      source: { kind: 'rp-agent-team', form: 'notice', summary: '正文核验回执' } }))
+  }
+
+  async function requestWithPublication(run, member, args, exec) {
+    const rule = member.communication.handoffs?.find(handoff => handoff.id === args.handoffId && handoff.to === args.to)
+    if (member.id !== run.outputAgentId || !member.outputAuthority.user || !rule?.autoPublish) {
+      throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', 'This agent and handoff cannot authorize automatic publication')
+    }
+    if (typeof args.data?.draft !== 'string' || !args.data.draft.trim()) {
+      throw teamError('RP_TEAM_EMPTY_PUBLICATION', 'Publication on approval requires a non-empty original draft')
+    }
+    const sessionId = String(exec?.agent?.session?.id ?? '')
+    const binding = childBindings.get(sessionId)
+    assertActiveCaller(exec.agent, run, member, sessionId)
+    assertBudgetAvailable(run)
+    exec.signal?.throwIfAborted()
+    const input = {
+      from: member.id, to: args.to, handoffId: args.handoffId, summary: args.summary, data: args.data, body: args.body,
+      topic: args.topic, reason: args.reason, depth: binding?.depth ?? 0, executionId: binding?.executionId, presentation: args.presentation
+    }
+    const peer = rule.id === 'check-draft' && parallelDraftReviewPeer(member)
+    let result
+    if (peer) {
+      const batch = await run.communication.requestMany({ from: member.id, depth: input.depth,
+        executionId: input.executionId, draftReview: true,
+        requests: [input, { ...input, to: peer.to, handoffId: peer.id, presentation: undefined }] })
+      result = batch.review
+      if (result.incomplete && !result.data.issues.length) {
+        throw teamError('RP_TEAM_DRAFT_REVIEW_INCOMPLETE', '正文未取得两路核验回执，请按正文核验失败流程处理。')
+      }
+    } else result = await run.communication.request(input)
+    if (result.data?.pass !== true) return result
+    exec.signal?.throwIfAborted()
+    assertActiveCaller(exec.agent, run, member, sessionId)
+    return publishFromAgent(run, member, { bodyRef: { $ref: result.ref, side: 'request', pointer: '/draft' } }, exec)
+  }
+
+  async function requestWorldWithPresentation(run, member, args, exec) {
+    const binding = childBindings.get(String(exec?.agent?.session?.id ?? ''))
+    const result = await run.communication.request({
+      from: member.id, to: args.to, handoffId: args.handoffId, summary: args.summary, data: args.data, body: args.body,
+      topic: args.topic, reason: args.reason, depth: binding?.depth ?? 0, executionId: binding?.executionId
+    })
+    const world = run.handoffRequests.find(row => row.handoffId === args.handoffId && row.from === member.id &&
+      row.sourceExecutionId === binding?.executionId && row.ref === result.ref)
+    const presentationCandidates = writerPresentationCandidates(run, member, stateStore, world)
+    return presentationCandidates.length ? { ...result, presentationCandidates } : result
   }
 
   async function publishFromAgent(run, member, args, exec) {
     assertBudgetAvailable(run)
     if (member.id !== run.outputAgentId || !member.outputAuthority.user) throw teamError('RP_TEAM_OUTPUT_FORBIDDEN', 'Only the configured user-output agent may publish')
+    if ((args.body === undefined) === (args.bodyRef === undefined)) {
+      throw teamError('RP_TEAM_INVALID_REQUEST', 'Publish with exactly one of body or bodyRef')
+    }
+    const approved = args.bodyRef === undefined ? undefined : run.communication.resolveApprovedBody({ writer: member.id, bodyRef: args.bodyRef })
     const sessionId = String(exec?.agent?.session?.id ?? '')
+    const executionId = childBindings.get(sessionId)?.executionId
+    if (!approved && parallelDraftReviewPeer(member)) {
+      const review = run.handoffRequests.findLast(row => row.from === member.id && row.sourceExecutionId === executionId &&
+        row.handoffId === 'check-draft' && row.mergedDraftReview)
+      if (review?.mergedDraftReview.verdict.issues.some(issue => args.body.includes(issue.quote))) {
+        throw teamError('RP_TEAM_DRAFT_REVIEW_REJECTED', '正式稿仍包含核验指出的原句。请先修正这些原句再发布。')
+      }
+    }
     const activation = run.sessionBindings.get(sessionId)?.activation
     if (run.publication) {
       if (run.publicationFinalized) throw teamError('RP_TEAM_ALREADY_PUBLISHED', 'The final publication is already locked')
@@ -1699,8 +2082,12 @@ export function createRpAgentTeam(ctx, dependencies) {
         throw teamError('RP_TEAM_DRAFT_NOT_VISIBLE', `Draft ${id} is not available to output agent ${member.id}`)
       }
     }
-    const publication = stagePublication(run, member.id, { body: args.body, selectedDraftIds, operationCount: 0 })
+    const publication = stagePublication(run, member.id, { body: approved?.data ?? args.body,
+      preserveWhitespace: approved !== undefined, selectedDraftIds, operationCount: 0 })
+    approved?.trace()
     run.publication.activation = activation
+    run.publication.executionId = executionId
+    if (approved && member.execution.livedHistoryWriterPresentation) run.publication.reviewRef = args.bodyRef.$ref
     record(run, { type: 'publication.candidate', agentId: member.id, data: { status: 'candidate', activation, bodyCharacters: publication.body.length } })
     persistRun(run)
     exec?.concludeTurn?.()
@@ -1715,6 +2102,14 @@ export function createRpAgentTeam(ctx, dependencies) {
       throw teamError('RP_TEAM_CANCELLED', String(signal?.reason?.message ?? signal?.reason ?? 'RP Agent Team runtime disposed'))
     }
     run.publicationFinalized = true
+    const ledger = publicationLedgerTargets({ run, stateStore, executionId: run.publication.executionId })
+    if (ledger.length) {
+      for (const agentId of new Set(ledger.map(entry => entry.agentId))) {
+        stageInternalWrites(run, agentById(run.config, agentId), ledger.filter(entry => entry.agentId === agentId).map(entry => entry.target))
+      }
+      record(run, { type: 'publication.ledger_reconciled', agentId: run.outputAgentId,
+        data: { events: ledger.map(({ event, from, shown }) => ({ event, from, shown })) } })
+    }
     const transaction = stateStore.stage({ conversationId: run.conversationId, runId: run.runId })
     run.stateTransaction = transaction
     const nextWorld = worldStateAfterWrites(run.worldSnapshot, transaction.writes)
@@ -2135,9 +2530,10 @@ export function createRpAgentTeam(ctx, dependencies) {
 
   function setManualAgents({ conversationId, agentIds }) {
     const saved = store.get(conversationId)
+    const { config } = resolveAuthorParameters(saved.config, saved.parameterValues)
     const selected = [...new Set(agentIds ?? [])]
     for (const id of selected) {
-      const agent = agentById(saved.config, id)
+      const agent = agentById(config, id)
       if (!agent.triggers.some(trigger => trigger.type === 'manual')) throw teamError('RP_TEAM_MANUAL_AGENT_INVALID', `Agent ${id} does not have a manual trigger`)
     }
     writeManualSelection(conversationId, selected)
@@ -2645,7 +3041,7 @@ function handoffTerminalResult(run, agentId, executionId, requestId, session, te
   if (request?.responseSchema && !submitted) {
     throw teamError('RP_TEAM_HANDOFF_RESULT_REQUIRED', 'This handoff requires rp_team_submit_internal from its exact target execution')
   }
-  if (submitted) return { summary: submitted.summary, data: submitted.data, typed: true }
+  if (submitted) return { summary: submitted.summary, data: submitted.data, typed: true, publicationReview: submitted.publicationReview }
   const summary = terminalAssistantText(session, terminal)
   if (!summary.trim()) throw teamError('RP_TEAM_HANDOFF_RESULT_REQUIRED', 'The target execution ended without a handoff result')
   return { summary }

@@ -7,7 +7,7 @@ import { defaultTeamConfig, normalizeTeamConfig, exportPreset, parsePreset } fro
 import { StateStore } from '../src/host/state-store.mjs'
 import { registerContextTools } from '../src/host/context-tools.mjs'
 import { registerTeamTools } from '../src/host/team-tools.mjs'
-import { selectedAgentAttachments } from '../src/host/agent-context.mjs'
+import { childPolicy, childPrompt, createChildContextData, selectedAgentAttachments } from '../src/host/agent-context.mjs'
 import { restrictMemberTools, HOST_PRODUCT_TOOLS } from '../src/host/native-policy.mjs'
 
 function fixture(t, sources = [{ type: 'hidden_state', selector: '/variables' }]) {
@@ -67,6 +67,42 @@ function fixture(t, sources = [{ type: 'hidden_state', selector: '/variables' }]
     call: (name, input, execution = exec) => tools.get(name).execute(input, execution) }
 }
 
+test('provenance chronicle sees only selected published assistant history and keeps opening material separate', t => {
+  const { member, run, store } = fixture(t, [
+    { type: 'current_input' }, { type: 'recent_history', limit: 2 }, { type: 'full_history' },
+    { type: 'character_card', selector: '/persona/name' }
+  ])
+  member.execution.livedHistoryPhase = 'chronicleProvenance'
+  run.currentInput = '本轮尚未转录的输入'
+  run.sources.current_input.text = run.currentInput
+  const history = [
+    { role: 'assistant', content: '不在最近选择中的旧正文' },
+    { role: 'user', content: '历史玩家输入' },
+    { role: 'assistant', content: '已发布的正文，原样保留。\n\n她放下杯子。' }
+  ]
+  run.sources.recent_history = history
+  run.sources.full_history = history
+  run.attachments = [{ type: 'file', name: '本轮用户附件' }]
+  const child = createChildContextData({ run, agent: member, stateStore: store })
+  assert.deepEqual(child.chronicleSources, [{ id: 'published-1', text: history[2].content }])
+  assert.deepEqual(child.agentContext.sources, { character_card: 'Known', chronicle_sources: child.chronicleSources })
+  assert.deepEqual(child.agentContext.categories, ['character_card', 'chronicle_sources'])
+  assert.deepEqual(child.attachments, [])
+
+  run.currentInput = '【开卷】我的初步理解'
+  run.sources.current_input.text = run.currentInput
+  const opening = createChildContextData({ run, agent: member, stateStore: store })
+  assert.equal(opening.agentContext.sources.current_input.text, run.currentInput)
+  assert.equal(opening.agentContext.sources.chronicle_sources, undefined)
+  assert.deepEqual(opening.chronicleSources, [])
+
+  member.execution.livedHistoryPhase = 'chronicle'
+  const legacy = createChildContextData({ run, agent: member, stateStore: store })
+  assert.equal(legacy.agentContext.sources.current_input.text, run.currentInput)
+  assert.deepEqual(legacy.agentContext.sources.recent_history, history.slice(-2))
+  assert.equal(legacy.chronicleSources, undefined)
+})
+
 test('context reads and searches filter categories, state fields, messages and private drafts before querying', async t => {
   const f = fixture(t, [
     { type: 'hidden_state', selector: '/variables' },
@@ -83,6 +119,56 @@ test('context reads and searches filter categories, state fields, messages and p
   }
   await assert.rejects(f.call('rp_team_read_context', { source: 'full_history' }), { code: 'RP_TEAM_CONTEXT_FORBIDDEN' })
   await assert.rejects(f.call('rp_team_search_context', { source: 'full_history', query: 'SECRET' }), { code: 'RP_TEAM_CONTEXT_FORBIDDEN' })
+})
+
+test('focused world keeps the previous beat verbatim and retrieves only authorized originals on demand', async t => {
+  const f = fixture(t, [
+    { type: 'agent_messages', agentIds: ['agent-2'] }, { type: 'current_input' }, { type: 'recent_history', limit: 2 },
+    { type: 'character_card', selector: '/persona' }, { type: 'worldbook', selector: '/entries/0/content' }
+  ])
+  Object.assign(f.member.execution, { livedHistoryPhase: 'world', livedHistoryFocusedWorld: true })
+  f.member.triggers = [{ type: 'requested_by_agent', from: ['agent-2'] }]
+  f.member.systemPrompt = '[[world:focused]]当前裁定限定规则[[/world]]\n[[world:other]]开卷专用规则[[/world]]'
+  const beat = '传输条停在最后一格，上传按钮仍灰着。\n\n她把茶杯挪了半寸。'
+  f.run.sources.recent_history = [{ role: 'assistant', content: '更早的正文' }, { role: 'assistant', content: beat }, { role: 'user', content: '已经进入本轮交接' }]
+  f.run.sources.character_card.persona.user_name = '甲'
+  f.run.sources.character_card.persona.assistant_name = '乙'
+  f.run.sources.worldbook.entries[0].content = '仅在堵住传输接口时上传才会失败。'
+  let mode = '裁定'
+  f.run.communication.getRequest = () => ({ to: f.member.id, handoffId: 'ask-world', request: { data: { mode } } })
+  f.run.communication.allMessages = () => [{ to: f.member.id, from: 'agent-2', requestId: 'older', type: 'request', data: { input: '旧交接' } },
+    { to: f.member.id, from: 'agent-2', requestId: 'current', type: 'request', handoffId: 'ask-world', body: '同义转述', summary: '同义转述', data: { mode, input: 'Hello' } }]
+  f.run.communication.targetsFor = () => ({ sendTo: [], requestTo: [] })
+  const getPacket = () => createChildContextData({ run: f.run, agent: f.member, stateStore: f.store, activation: { requestId: 'current' } })
+  const packet = getPacket()
+  const pending = new Map([['current', { ...packet, agentId: f.member.id, activationNo: 1 }]])
+  assert.equal(packet.focusedWorld, true)
+  assert.deepEqual(packet.agentContext.sources.world_last_beat, { text: beat, clipped: false })
+  assert.deepEqual(packet.agentContext.sources.world_names, { user_name: '甲', assistant_name: '乙' })
+  assert.deepEqual(packet.agentContext.sources.world_source_lookup, ['recent_history', 'character_card', 'worldbook'])
+  assert.deepEqual(packet.agentContext.sources.agent_messages, [{ requestId: 'current', from: 'agent-2', handoffId: 'ask-world', data: { mode, input: 'Hello' } }])
+  for (const key of ['current_input', 'recent_history', 'character_card', 'worldbook']) assert.equal(Object.hasOwn(packet.agentContext.sources, key), false)
+  const text = childPrompt(f.member, f.run, packet.agentContext, 1, pending)[0].text
+  assert.match(text, /当前裁定限定规则/)
+  assert.match(text, /上传按钮仍灰着/)
+  assert.doesNotMatch(text, /开卷专用规则|SECRET_CANARY|仅在堵住传输接口|更早的正文|同义转述/)
+  assert.deepEqual(await f.call('rp_team_read_context', { source: 'character_card', path: '/user_name' }), { found: true, value: '甲' })
+  const book = await f.call('rp_team_search_context', { source: 'worldbook', query: '传输接口' })
+  assert.deepEqual(book.matches, [{ path: '', value: '仅在堵住传输接口时上传才会失败。' }])
+  assert.deepEqual(await f.call('rp_team_search_context', { source: 'worldbook', query: 'SECRET_CANARY' }), { matches: [] })
+  await assert.rejects(f.call('rp_team_read_context', { source: 'full_history' }), { code: 'RP_TEAM_CONTEXT_FORBIDDEN' })
+  for (const other of ['开卷', '补充', '修订']) {
+    mode = other
+    const normal = getPacket()
+    assert.equal(normal.focusedWorld, undefined)
+    assert.equal(normal.agentContext.sources.worldbook, '仅在堵住传输接口时上传才会失败。')
+    assert.deepEqual(normal.agentContext.sources.recent_history, f.run.sources.recent_history.slice(-2))
+    const normalPending = new Map([['current', { ...normal, agentId: f.member.id, activationNo: 1 }]])
+    assert.match(childPolicy(f.member, f.run, 1, normalPending), /开卷专用规则/)
+  }
+  const tick = createChildContextData({ run: f.run, agent: f.member, stateStore: f.store, activation: {} })
+  assert.equal(tick.focusedWorld, undefined)
+  assert.equal(tick.agentContext.sources.worldbook, '仅在堵住传输接口时上传才会失败。')
 })
 
 test('selectors, limits and escaped result paths stay within the filtered packet', async t => {

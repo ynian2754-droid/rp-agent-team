@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { exportPreset, normalizeTeamConfig, parsePreset, teamError } from '../shared/schema.mjs'
-import { usesParameterInsertions } from '../shared/author-parameters.mjs'
+import { exportPreset, normalizeTeamConfig, parsePreset, teamError, usesChronicleProvenance, usesFastHandoffs, usesHandoffReferences, usesLivedHistoryFocusedHandoffs, usesLivedHistoryGroundRefs, usesLivedHistoryIndependentReview, usesLivedHistoryParallelReview, usesLivedHistoryPreparedPublication, usesLivedHistoryRefChoices, usesLivedHistoryTypedTurns, usesLivedHistoryTurnTools, usesOrderedMemoryAppend, usesParallelHandoffs, usesPreparedLivedHistory, usesTerminalHandoffs } from '../shared/schema.mjs'
+import { usesParameterInsertions, usesParameterStructure } from '../shared/author-parameters.mjs'
 
 const LIBRARY_VERSION = 1
 
@@ -135,7 +135,23 @@ export class PresetLibrary {
 
 export function portablePreset(config) {
   const portable = exportPreset(normalizeTeamConfig(config))
-  if (usesParameterInsertions(portable.config.authorParameters)) portable.dependencies.minimumPluginVersion = '0.7.0'
+  if (usesParameterStructure(portable.config.authorParameters)) portable.dependencies.minimumPluginVersion = '0.7.19'
+  else if (usesLivedHistoryParallelReview(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.18'
+  else if (usesLivedHistoryIndependentReview(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.17'
+  else if (usesLivedHistoryRefChoices(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.16'
+  else if (usesLivedHistoryPreparedPublication(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.15'
+  else if (usesLivedHistoryTypedTurns(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.14'
+  else if (usesLivedHistoryFocusedHandoffs(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.13'
+  else if (usesLivedHistoryGroundRefs(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.12'
+  else if (usesLivedHistoryTurnTools(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.11'
+  else if (usesOrderedMemoryAppend(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.10'
+  else if (usesChronicleProvenance(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.9'
+  else if (usesPreparedLivedHistory(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.8'
+  else if (usesFastHandoffs(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.7'
+  else if (usesParallelHandoffs(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.6'
+  else if (usesTerminalHandoffs(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.5'
+  else if (usesHandoffReferences(portable.config)) portable.dependencies.minimumPluginVersion = '0.7.4'
+  else if (usesParameterInsertions(portable.config.authorParameters)) portable.dependencies.minimumPluginVersion = '0.7.0'
   else if (requires040(portable.config)) portable.dependencies.minimumPluginVersion = '0.4.0'
   else if (requires030(portable.config)) portable.dependencies.minimumPluginVersion = '0.3.0'
   return portable

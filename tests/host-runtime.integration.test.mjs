@@ -5,8 +5,9 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { createRpAgentTeam } from '../src/host/runtime.mjs'
 import { runFilePath } from '../src/host/run-persistence.mjs'
+import { readRequestRecords } from '../src/host/request-persistence.mjs'
 import { TEAM_DELIVERY_MODEL, TEAM_DELIVERY_PROVIDER } from '../src/host/delivery-adapter.mjs'
-import { defaultTeamConfig } from '../src/shared/schema.mjs'
+import { createAgent, defaultTeamConfig } from '../src/shared/schema.mjs'
 
 const CONVERSATION_ID = 'native-hook-conversation'
 const ROOT_SESSION_ID = 'native-root-session'
@@ -20,7 +21,7 @@ function nativeTurnReason(previousReason, decision, step) {
 }
 
 function fixture({ receiptOutcome = 'pending', preparedTurn = 1, sessionListed = true,
-  stageGate, stageError, onStageRequest, receiptGate, onReceiptQuery } = {}) {
+  stageGate, stageError, onStageRequest, receiptGate, onReceiptQuery, executeChild } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'rp-team-native-hooks-'))
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
@@ -33,6 +34,7 @@ function fixture({ receiptOutcome = 'pending', preparedTurn = 1, sessionListed =
   const stageCalls = []
   const invokedTools = []
   const childRequests = []
+  const concludedTurns = new Set()
   const childContextReads = []
   const childTasks = new Set()
   const presetBindings = new Map()
@@ -109,7 +111,7 @@ function fixture({ receiptOutcome = 'pending', preparedTurn = 1, sessionListed =
         return () => { const index = guards.indexOf(guard); if (index >= 0) guards.splice(index, 1) }
       },
       async invoke(name, args = {}, agent, signal = new AbortController().signal) {
-        const execution = { name, agent, signal, concludeTurn() {} }
+        const execution = { name, agent, signal, concludeTurn: () => concludedTurns.add(agent.session.id) }
         if (declarationFilters.some(accept => !accept(localTools.get(name) ?? { name }))) throw new Error(`Tool "${name}" is denied in this scope`)
         for (const guard of guards) {
           const denial = guard(execution)
@@ -226,14 +228,28 @@ function fixture({ receiptOutcome = 'pending', preparedTurn = 1, sessionListed =
           }, { agent: child, scope: child.ctx.scope })
           childRequests.push({ sessionId: childId, model, tools: requestAssembly.tools,
             agentPreset: ctx.agentPresets.composedPreset(child.ctx) })
-          if (childId === 'native-child-1') {
+          if (executeChild) {
+            await executeChild({ agent: child, invoke: (name, args) => childScope.ctx.tools.invoke(name, args, child),
+              concluded: () => concludedTurns.has(childId),
+              async stopWithDraft(text, finish = 'stop') {
+                await child.session.append('assistant/message', { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text }] },
+                  stream: [{ type: 'chunk', chunk: { type: 'finish', reason: { kind: finish } } }] })
+                await childScope.ctx.dispatch('agent/turn-stopping', { agent: child, turn: 1, signal: AbortSignal.timeout(2000) })
+              } })
+          } else if (childId === 'native-child-1') {
             await assert.rejects(() => childScope.ctx.tools.invoke('eleckoi_apply_variable_patch', {}, child), /denied|not authorized/u)
             childContextReads.push(await childScope.ctx.tools.invoke('rp_team_read_context', { source: 'worldbook' }, child))
             childContextReads.push(await childScope.ctx.tools.invoke('rp_team_read_context', { source: 'recent_history' }, child))
             // The member's own model request passes the llm/stream hook while its activation is running.
             await dispatchLlmStream({ sessionId: childId, provider: model.provider, model: model.model,
               messages: [{ role: 'user', content: 'member request' }] }, async () => ({}))
+            // DSH repeats a step whose tool arguments were malformed when the provider retryPolicy allows it.
+            await emitSessionEvent(child.session, { type: 'llm/retry', seq: seq++, data: {
+              retryId: 'retry-1', turn: 1, step: 1, provider: model.provider, mode: 'normal', retry: 1, maxRetries: 5, delayMs: 500,
+              failure: { code: 'MALFORMED_RESPONSE', message: 'Tool call "rp_team_submit_internal": Expected a comma after an array element' }
+            } })
             await childScope.ctx.tools.invoke('rp_team_submit_internal', { summary: 'Observed the doorway.' }, child)
+            assert.equal(concludedTurns.has(childId), false, 'an ordinary internal result does not end a native turn')
           } else {
             await childScope.ctx.tools.invoke('rp_team_publish', { body: 'The door opened onto the rain-lit street.' }, child)
           }
@@ -402,13 +418,13 @@ function fixture({ receiptOutcome = 'pending', preparedTurn = 1, sessionListed =
     get runtime() { return runtime },
     get spawnCount() { return nextChildId - 1 },
     get currentTurnLookups() { return currentTurnLookups },
-    async configure(config = defaultTeamConfig(), { enabled = true, expectedRevision = 0 } = {}) {
+    async configure(config = defaultTeamConfig(), { enabled = true, expectedRevision = 0, parameterValues } = {}) {
       if (config.agents?.[0] && !config.agents[0].context.sources.some(source => source.type === 'worldbook')) {
         config.agents[0].context.sources.push({ type: 'worldbook' })
       }
       return await runtime.api.saveConfig({
         conversationId: CONVERSATION_ID, expectedRevision,
-        enabled, config
+        enabled, config, parameterValues
       })
     },
     async startRootTurn({ turn = prepared.turn, message = inputMessage } = {}) {
@@ -530,6 +546,464 @@ function fixture({ receiptOutcome = 'pending', preparedTurn = 1, sessionListed =
   }
 }
 
+test('the native turn mounts only agents in the selected author structure and commits its normal publication', async () => {
+  const body = 'The shorter route still publishes once.'
+  const f = fixture({ executeChild: async ({ invoke, concluded }) => {
+    await invoke('rp_team_publish', { body })
+    assert.equal(concluded(), true)
+  } })
+  try {
+    const config = defaultTeamConfig()
+    const [checker, narrator] = config.agents
+    config.authorParameters = [{ id: 'composition', name: 'Composition', type: 'choice', default: 'full', options: [
+      { label: 'Full', value: 'full' },
+      { label: 'Compact', value: 'compact', structure: {
+        excludeAgents: [checker.id], prompts: { [narrator.id]: 'Write the compact continuation.' }
+      } }
+    ], bindings: [] }]
+    const saved = await f.configure(config, { parameterValues: { composition: 'compact' } })
+    assert.deepEqual(saved.config.agents.map(agent => agent.id), [checker.id, narrator.id])
+    assert.deepEqual(saved.parameterValues, { composition: 'compact' })
+    await f.startRootTurn()
+    assert.equal((await f.runLocalDelivery()).body, body)
+    assert.equal(f.spawnCount, 1)
+    assert.equal(f.stageCalls.length, 1)
+    const committed = await f.commitRootTurn(body)
+    assert.equal(committed.run.phase, 'complete')
+    const traceRoot = join(dirname(f.runtime.authoring.store.path), 'traces')
+    const persisted = JSON.parse(readFileSync(runFilePath(traceRoot, CONVERSATION_ID, committed.run.runId), 'utf8'))
+    assert.deepEqual(persisted.config.agents.map(agent => [agent.id, agent.systemPrompt]), [[narrator.id, 'Write the compact continuation.']])
+    assert.deepEqual(persisted.templateConfig.agents.map(agent => agent.id), [checker.id, narrator.id])
+  } finally {
+    await f.dispose()
+  }
+})
+
+test('a valid terminal verdict concludes the native child and an approved draft reference publishes exact text', async () => {
+  const draft = '\n  Preserve the submitted draft, including whitespace.\r\n'
+  let checks = 0
+  const f = fixture({ executeChild: async ({ agent, invoke, concluded }) => {
+    if (agent.session.id === 'native-child-1') {
+      const check = () => invoke('rp_team_request', { to: 'agent-2', handoffId: 'check-draft', data: { draft } })
+      const rejected = await check()
+      assert.deepEqual(rejected.data, { pass: false })
+      const ref = result => ({ $ref: result.ref, side: 'request', pointer: '/draft' })
+      await assert.rejects(() => invoke('rp_team_publish', { bodyRef: ref(rejected) }), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+      const accepted = await check()
+      assert.deepEqual(accepted.data, { pass: true })
+      await assert.rejects(() => invoke('rp_team_publish', { body: 'altered draft', bodyRef: ref(accepted) }), { code: 'RP_TEAM_INVALID_REQUEST' })
+      await invoke('rp_team_publish', { bodyRef: ref(accepted) })
+      return
+    }
+    checks++
+    await assert.rejects(() => invoke('rp_team_submit_internal', { summary: 'Invalid', data: {} }), { code: 'RP_TEAM_HANDOFF_RESPONSE_INVALID' })
+    assert.equal(concluded(), false)
+    await invoke('rp_team_submit_internal', { summary: 'Valid', data: { pass: checks > 1 } })
+    assert.equal(concluded(), true)
+    await invoke('rp_team_submit_internal', { summary: 'Duplicate', data: { pass: checks === 1 } })
+  } })
+  try {
+    const config = defaultTeamConfig()
+    config.agents[0].outputAuthority.user = true
+    config.output.agentId = 'agent-1'
+    config.agents[0].communication.handoffs = [{ id: 'check-draft', to: 'agent-2', mode: 'await', references: true, terminal: true,
+      responseSchema: { type: 'object', required: ['data'], properties: {
+        data: { type: 'object', required: ['pass'], properties: { pass: { type: 'boolean' } } }
+      } } }]
+    config.agents[1].outputAuthority.user = false
+    config.agents[1].execution.after = []
+    config.agents[1].triggers = [{ type: 'requested_by_agent', from: ['agent-1'] }]
+    await f.configure(config)
+    await f.startRootTurn()
+    const { body } = await f.runLocalDelivery()
+    assert.equal(body, draft)
+    assert.equal(f.stageCalls.length, 1)
+    assert.equal(checks, 2)
+    const committed = await f.commitRootTurn(body)
+    assert.equal(committed.run.phase, 'complete')
+    const trace = await f.runtime.api.getTrace({ conversationId: CONVERSATION_ID, runId: committed.run.runId })
+    assert.equal(trace.events.filter(event => event.type === 'internal.submitted').length, 2)
+    assert.equal(trace.events.filter(event => event.type === 'handoff.refs_resolved' && event.data.direction === 'publication').length, 1)
+  } finally {
+    await f.dispose()
+  }
+})
+
+function automaticDraftConfig({ timeoutMs = 1000, compactReview } = {}) {
+  const config = defaultTeamConfig()
+  config.agents[0].outputAuthority.user = true
+  config.output.agentId = 'agent-1'
+  config.agents[0].communication.handoffs = [{ id: 'check-draft', to: 'agent-2', mode: 'await',
+    references: true, terminal: true, autoPublish: true, timeoutMs, ...(compactReview ? { compactReview } : {}),
+    responseSchema: { type: 'object', required: ['data'], properties: {
+      data: { type: 'object', required: ['pass'], properties: { pass: { type: 'boolean' } } }
+    } } }]
+  config.agents[1].outputAuthority.user = false
+  config.agents[1].execution.after = []
+  config.agents[1].triggers = [{ type: 'requested_by_agent', from: ['agent-1'] }]
+  return config
+}
+
+test('explicitly authorized draft approval stages exact prose and closes the original activation', async () => {
+  const draft = '\n  Keep whitespace in the approved prose.\r\n'
+  const f = fixture({ executeChild: async ({ agent, invoke, concluded }) => {
+    if (agent.session.id === 'native-child-1') {
+      await assert.rejects(() => invoke('rp_team_request', {
+        to: 'agent-2', handoffId: 'unapproved', publishOnPass: true, data: { draft }
+      }), { code: 'RP_TEAM_OUTPUT_FORBIDDEN' })
+      const check = text => invoke('rp_team_request', {
+        to: 'agent-2', handoffId: 'check-draft', publishOnPass: true, data: { draft: text, world_return: {} }
+      })
+      const rejected = await check('Earlier draft')
+      assert.equal(rejected.data.pass, false)
+      assert.equal(concluded(), false)
+      assert.equal((await check(draft)).status, 'staged')
+      assert.equal(concluded(), true)
+      return
+    }
+    await invoke('rp_team_submit_internal', { summary: 'Verdict', data: { pass: agent.session.id !== 'native-child-2' } })
+    assert.equal(concluded(), true)
+  } })
+  try {
+    await f.configure(automaticDraftConfig({ compactReview: 'draft' }))
+    await f.startRootTurn()
+    const { body } = await f.runLocalDelivery()
+    assert.equal(body, draft)
+    assert.equal(f.stageCalls.length, 1)
+    const committed = await f.commitRootTurn(body)
+    assert.equal(committed.run.phase, 'complete')
+    const trace = await f.runtime.api.getTrace({ conversationId: CONVERSATION_ID, runId: committed.run.runId })
+    assert.equal(trace.events.filter(event => event.type === 'publication.candidate').length, 1)
+    assert.equal(trace.events.filter(event => event.type === 'handoff.refs_resolved' && event.data.direction === 'publication').length, 1)
+  } finally {
+    await f.dispose()
+  }
+})
+
+for (const { passes, direct } of [{ passes: true }, { passes: false }, { passes: true, direct: true }, { passes: false, direct: true }]) {
+  test(`the native boundary recovers one skipped ${direct ? 'direct ' : ''}draft review ${passes ? 'and publishes the exact approved draft' : 'without publishing a rejected draft'}`, async () => {
+    const draft = '\n  A lantern burned. The street was listening.\r\n'
+    const revision = 'A lantern burned.'
+    const issues = passes ? [] : [{ kind: '过度解释', quote: 'The street was listening.', note: 'Remove the invented observation.' }]
+    const steering = []
+    const world = { established: [{ event: 'event-1', content: 'A lantern burned.' }], hidden_bookkeeping: 'Excluded from the draft review.' }
+    const config = automaticDraftConfig({ compactReview: 'draft' })
+    config.agents[0].execution.recoverSkippedDraftReview = true
+    const narrator = config.agents[0].communication
+    narrator.handoffs[0].scopedReview = true
+    narrator.handoffs[0].responseSchema.properties.data.properties.issues = { type: 'array' }
+    narrator.requestTo.push('world')
+    narrator.receiveFrom.push('world')
+    narrator.handoffs.push({ id: 'ask-world', to: 'world', mode: 'await', terminal: true, references: true,
+      responseSchema: { type: 'object', required: ['data'], properties: { data: { type: 'object' } } } })
+    config.agents.push(createAgent({ id: 'world', triggers: [{ type: 'requested_by_agent', from: ['agent-1'] }],
+      communication: { requestFrom: ['agent-1'], sendTo: ['agent-1'] } }))
+    config.agents[1].parameters.reasoningEffort = 'high'
+    if (direct) config.agents[1].execution.livedHistoryDirectDraftReview = true
+    const f = fixture({ executeChild: async ({ agent, invoke, stopWithDraft }) => {
+      if (agent.session.id === 'native-child-1') {
+        await invoke('rp_team_request', { to: 'world', handoffId: 'ask-world' })
+        agent.steer = message => steering.push(message)
+        await stopWithDraft(draft)
+        if (!passes) {
+          assert.equal(steering.length, 1)
+          assert.match(steering[0].content[0].text, /The street was listening\./u)
+          await stopWithDraft(revision)
+          assert.equal(steering.length, 1)
+          await invoke('rp_team_publish', { body: revision })
+        } else assert.deepEqual(steering, [])
+        return
+      }
+      if (agent.session.id === 'native-child-2') {
+        await invoke('rp_team_submit_internal', { summary: 'A world fact', data: world })
+        return
+      }
+      const verdict = { pass: passes, issues }
+      await invoke('rp_team_submit_internal', direct ? verdict : { summary: 'Review complete', data: verdict })
+    } })
+    try {
+      await f.configure(config)
+      await f.startRootTurn()
+      const { body } = await f.runLocalDelivery()
+      assert.equal(body, passes ? draft : revision)
+      assert.equal(f.stageCalls.length, 1)
+      assert.equal(f.spawnCount, 3)
+      assert.equal(f.childRequests.find(row => row.sessionId === 'native-child-3').model.reasoningEffort, 'high')
+      const committed = await f.commitRootTurn(body)
+      assert.equal(committed.run.phase, 'complete')
+      const trace = await f.runtime.api.getTrace({ conversationId: CONVERSATION_ID, runId: committed.run.runId })
+      assert.equal(trace.events.filter(event => event.type === 'publication.draft_review_recovered').length, 1)
+      assert.equal(trace.events.filter(event => event.type === 'publication.candidate').length, 1)
+      const review = trace.events.find(event => event.type === 'handoff.refs_resolved' && event.data.handoffId === 'check-draft' && event.data.direction === 'request')
+      assert.deepEqual(review.data.refs, [{ ref: 'ask-world#1', side: 'result', at: '/world_return' }])
+    } finally {
+      await f.dispose()
+    }
+  })
+}
+
+test('world and clerk fast tools commit the ordered adjudication and only the reviewed simulation writes', async () => {
+  const config = defaultTeamConfig()
+  const namespace = 'shared'
+  const events = '/canon/events'
+  const storyLog = '/story/settings-log'
+  const body = 'A nod from the doorway.'
+  const stimulus = 'Continue from the doorway.'
+  const terminal = (id, to, fields, flags = {}) => ({
+    id, to, mode: 'await', references: true, terminal: true, timeoutMs: 1200, ...flags,
+    responseSchema: { type: 'object', required: ['data'], properties: {
+      data: { type: 'object', required: fields, properties: {} }
+    } }
+  })
+  const requestScope = (from, to, handoffs) => ({
+    requestFrom: [from], sendTo: [from],
+    ...(to.length ? { requestTo: to, receiveFrom: to, handoffs } : {})
+  })
+  const permissions = (paths, access = 'readwrite') => paths.map(path => ({ namespace, path, access }))
+  const worldHandoff = terminal('ask-file', 'clerk', ['groups', 'untreated'], {
+    requestSchema: { type: 'object', required: ['data'], properties: {
+      data: { type: 'object', required: ['mode', 'player', 'present', 'stimulus'], properties: {} }
+    } }
+  })
+  config.agents = [
+    createAgent({ id: 'narrator', outputAuthority: { user: true }, communication: {
+      requestTo: ['world'], receiveFrom: ['world'], handoffs: [terminal('ask-world', 'world', ['established', 'attempts'])]
+    } }),
+    createAgent({
+      id: 'world', triggers: [{ type: 'requested_by_agent', from: ['narrator'] }],
+      execution: { livedHistoryPhase: 'world', livedHistoryWorldTurn: true, memoryAppend: true },
+      outputAuthority: { state: true }, communication: requestScope('narrator', ['clerk'], [worldHandoff]),
+      statePermissions: permissions([events, '/canon/world', storyLog])
+    }),
+    createAgent({
+      id: 'clerk', triggers: [{ type: 'requested_by_agent', from: ['world'] }],
+      execution: { livedHistorySingleGroup: true },
+      outputAuthority: { state: true },
+      communication: requestScope('world', ['sim-1', 'checker'], [
+        terminal('ask-sim-1', 'sim-1', ['beats'], { simulation: true, materialPack: true }),
+        terminal('check-sim', 'checker', ['pass', 'issues'], { compactReview: 'simulation', scopedReview: true })
+      ]),
+      statePermissions: [...permissions([events, '/memories', '/selves', '/canon/world'], 'read'), ...permissions(['/story/packs'])]
+    }),
+    createAgent({
+      id: 'sim-1', triggers: [{ type: 'requested_by_agent', from: ['clerk'] }],
+      execution: { livedHistoryGroundRefs: true },
+      outputAuthority: { state: true }, communication: requestScope('clerk', []),
+      statePermissions: permissions(['/memories'], 'write')
+    }),
+    createAgent({
+      id: 'checker', triggers: [{ type: 'requested_by_agent', from: ['clerk'] }],
+      parameters: { reasoningEffort: 'high' }, communication: requestScope('clerk', [])
+    })
+  ]
+  config.output.agentId = 'narrator'
+  config.memory = { collections: [{ id: 'events', name: 'Events', namespace, path: events }] }
+  config.state.definitions = [
+    { namespace, path: events, type: 'array', default: [{ id: 'old', content: 'Old event.' }] },
+    { namespace, path: '/canon/world', type: 'object', default: {} },
+    { namespace, path: '/memories', type: 'object', default: {} },
+    { namespace, path: '/selves', type: 'object', default: { npc: { commitments: { k1: { what: 'Face the question.' } } } } },
+    { namespace, path: '/story/packs', type: 'array', default: [] },
+    { namespace, path: storyLog, type: 'array', default: [] }
+  ]
+  let stimulusId
+  let outcomeId
+  let worldTurn
+  const statePath = () => join(dirname(f.runtime.authoring.store.path), 'state.json')
+  const state = () => JSON.parse(readFileSync(statePath(), 'utf8')).conversations[CONVERSATION_ID]
+  const f = fixture({ executeChild: async ({ agent, invoke, concluded }) => {
+    const id = agent.session.id
+    if (id === 'native-child-1') {
+      worldTurn = await invoke('rp_team_request', { to: 'world', handoffId: 'ask-world', data: { mode: '裁定' } })
+      outcomeId = worldTurn.data.established[0].event
+      await invoke('rp_team_publish', { body })
+    } else if (id === 'native-child-2') {
+      const args = { summary: 'Set up the beat', stimuli: [{ content: stimulus, record: {
+        content: stimulus, storyTime: '22:47', perceivers: [{ who: 'npc', how: '目击' }], people: ['npc']
+      } }], settingsLog: { expectedVersion: 0, value: [{ from: '22:47' }] } }
+      await assert.rejects(() => invoke('rp_team_world_start', { ...args, file: { player: 'player' } }), { code: 'RP_TEAM_HANDOFF_REQUEST_INVALID' })
+      const start = () => invoke('rp_team_world_start', { ...args, file: { player: 'player', present: ['npc'] } })
+      const filed = await start()
+      assert.equal(filed.data.groups[0].beats[0].does, 'Nods.')
+      stimulusId = filed.stimulus[0].event
+      await assert.rejects(start, { code: 'RP_TEAM_WORLD_START_INVALID' })
+      const finish = data => invoke('rp_team_world_submit', {
+        summary: 'Adjudicated', data, events: [
+          { key: 'response', record: { content: body, source: '裁定', storyTime: '22:48', because: [stimulusId] } },
+          { key: 'followup', record: { content: 'The NPC adds a question.', source: '裁定', storyTime: '22:49', because: ['response'] } }
+        ]
+      })
+      await assert.rejects(() => finish({ established: [] }), { code: 'RP_TEAM_HANDOFF_RESPONSE_INVALID' })
+      const before = await invoke('rp_team_read_state', { namespace, path: events })
+      assert.deepEqual(before.value.map(row => row.id), ['old', stimulusId])
+      await finish({ established: [{ event: 'response', content: body }, { event: 'followup', content: 'The NPC adds a question.' }],
+        attempts: { $ref: filed.ref, pointer: '/groups' } })
+      assert.equal(concluded(), true)
+    } else if (id === 'native-child-3') {
+      await invoke('rp_team_clerk_single_group', { summary: 'Select evidence', selection: { slot: 1, group: ['npc'] } })
+      assert.equal(concluded(), true)
+    } else if (id === 'native-child-4' || id === 'native-child-6') {
+      const first = id === 'native-child-4'
+      if (first) {
+        await assert.rejects(() => invoke('rp_team_submit_internal', { summary: 'Unqualified evidence', data: {
+          beats: [{ who: 'npc', does: 'Stares.', grounds: [{ ref: 'k1', note: 'Faces the question.' }] }],
+          stateOps: [{ person: 'npc', area: 'memories', path: ['m1'], value: { content: 'Invalid grounds' } }]
+        } }), { code: 'RP_TEAM_SIMULATION_EVIDENCE_INVALID' })
+        const [transaction] = Object.values(state().runs)
+        assert.equal(transaction.writes.some(row => row.path === '/memories/npc/m1'), false)
+        assert.equal(concluded(), false)
+        assert.equal(f.spawnCount, 4)
+      }
+      await invoke('rp_team_submit_internal', { summary: 'Tried a reaction', data: {
+        beats: [{ who: 'npc', does: first ? 'Stares.' : 'Nods.',
+          grounds: [{ ref: 'self.commitments.k1', note: 'Faces the question.' }] }],
+        stateOps: [{ person: 'npc', area: 'memories', path: ['m1'], value: { content: first ? 'Rejected' : 'Accepted' } }]
+      } })
+    } else {
+      const first = id === 'native-child-5'
+      const [transaction] = Object.values(state().runs)
+      assert.equal(transaction.writes.some(row => row.path === '/memories/npc/m1'), false)
+      await invoke('rp_team_submit_internal', { summary: 'Reviewed the reaction', data: {
+        pass: !first, issues: first ? [{ who: 'npc', kind: '读心', note: 'Remove invented observation.' }] : []
+      } })
+    }
+  } })
+  try {
+    await f.configure(config)
+    await f.startRootTurn()
+    assert.equal((await f.runLocalDelivery()).body, body)
+    assert.equal(f.stageCalls.length, 1)
+    const committed = await f.commitRootTurn(body)
+    assert.equal(committed.run.phase, 'complete')
+    assert.equal(f.spawnCount, 7)
+    assert.deepEqual(f.childRequests.find(row => row.sessionId === 'native-child-3').tools.map(tool => tool.name),
+      ['rp_team_submit_internal', 'rp_team_clerk_single_group'])
+    for (const id of ['native-child-5', 'native-child-7']) {
+      assert.equal(f.childRequests.find(row => row.sessionId === id).model.reasoningEffort, 'high')
+    }
+    const persisted = state().namespaces.shared
+    assert.deepEqual(persisted.canon.events.map(row => row.id), ['old', stimulusId, outcomeId, worldTurn.data.established[1].event])
+    assert.deepEqual(persisted.canon.events[2].because, [stimulusId])
+    assert.deepEqual(persisted.canon.events[3].because, [outcomeId])
+    assert.deepEqual(persisted.memories.npc.m1, { content: 'Accepted' })
+    assert.equal(persisted.story.packs[0].groups[0].ids.filter(id => id === stimulusId).length, 1)
+    assert.equal(persisted.story['settings-log'].length, 1)
+    assert.equal(worldTurn.data.attempts[0].beats[0].does, 'Nods.')
+  } finally {
+    await f.dispose()
+  }
+})
+
+test('focused world retry reuses its staged stimulus and accepted clerk result', async () => {
+  const config = defaultTeamConfig()
+  const body = 'The other person nods.'
+  const stimulus = 'Continue from the doorway.'
+  const events = '/canon/events'
+  const namespace = 'shared'
+  const terminal = (id, to, fields) => ({ id, to, mode: 'await', references: true, terminal: true,
+    timeoutMs: 1000, onFailure: 'return_error', responseSchema: { type: 'object', required: ['data'], properties: {
+      data: { type: 'object', required: fields, properties: {} }
+    } } })
+  config.output.agentId = 'narrator'
+  config.agents = [
+    createAgent({ id: 'narrator', outputAuthority: { user: true }, communication: {
+      requestTo: ['world'], receiveFrom: ['world'], handoffs: [terminal('ask-world', 'world', ['established', 'attempts'])]
+    } }),
+    createAgent({ id: 'world', triggers: [{ type: 'requested_by_agent', from: ['narrator'] }], execution: {
+      livedHistoryPhase: 'world', livedHistoryWorldTurn: true, memoryAppend: true, livedHistoryFocusedWorld: true
+    }, statePermissions: [{ namespace, path: events, access: 'readwrite' }], outputAuthority: { state: true },
+    communication: { requestFrom: ['narrator'], sendTo: ['narrator'], requestTo: ['clerk'], receiveFrom: ['clerk'],
+      handoffs: [terminal('ask-file', 'clerk', ['groups'])] } }),
+    createAgent({ id: 'clerk', triggers: [{ type: 'requested_by_agent', from: ['world'] }],
+      communication: { requestFrom: ['world'], sendTo: ['world'] } })
+  ]
+  config.memory = { collections: [{ id: 'events', name: 'Events', namespace, path: events }] }
+  config.state.definitions = [{ namespace, path: events, type: 'array', default: [] }]
+  let firstStimulusId
+  let clerkCalls = 0
+  const f = fixture({ executeChild: async ({ agent, invoke }) => {
+    const id = agent.session.id
+    if (id === 'native-child-1') {
+      // The first world activation closes before it submits a valid adjudication.
+      const request = () => invoke('rp_team_request', { to: 'world', handoffId: 'ask-world', data: { mode: '裁定' } })
+      await assert.rejects(request)
+      const completed = await request()
+      assert.equal(completed.data.attempts[0].beats[0].does, 'Nods.')
+      await invoke('rp_team_publish', { body })
+    } else if (id === 'native-child-2' || id === 'native-child-4') {
+      const initial = id === 'native-child-2'
+      const filed = await invoke('rp_team_world_start', { summary: 'Set up the beat', file: { player: 'player', present: ['npc'] },
+        stimuli: [{ content: stimulus, record: { content: initial ? 'The player continues.' : 'The player resumes.',
+          storyTime: '22:47', people: ['npc'], perceivers: [{ who: 'npc', how: '目击' }], weight: '寻常', shown: '已呈现' } }] })
+      assert.equal(filed.ref, 'ask-file#1')
+      if (initial) {
+        firstStimulusId = filed.stimulus[0].event
+        return
+      }
+      assert.equal(filed.stimulus[0].event, firstStimulusId)
+      await invoke('rp_team_world_submit', { summary: 'Adjudicated', data: {
+        established: [{ event: 'outcome', content: body }], attempts: { $ref: filed.ref, pointer: '/groups' }
+      }, events: [{ key: 'outcome', record: { content: body, storyTime: '22:48', source: '裁定', because: [firstStimulusId] } }] })
+    } else if (id === 'native-child-3') {
+      clerkCalls++
+      await invoke('rp_team_submit_internal', { summary: 'Prepared result', data: { groups: [{ beats: [{ does: 'Nods.' }] }] } })
+    } else assert.fail(`Unexpected second clerk activation ${id}`)
+  } })
+  try {
+    await f.configure(config)
+    await f.startRootTurn()
+    assert.equal((await f.runLocalDelivery()).body, body)
+    const committed = await f.commitRootTurn(body)
+    assert.equal(committed.run.phase, 'complete')
+    assert.equal(clerkCalls, 1)
+    assert.equal(f.spawnCount, 4)
+    const traceRoot = join(dirname(f.runtime.authoring.store.path), 'traces')
+    const requests = readRequestRecords(traceRoot, CONVERSATION_ID, committed.run.runId)
+    const reusedFile = requests.find(row => row.handoffId === 'ask-file')
+    const successfulWorld = requests.find(row => row.handoffId === 'ask-world' && row.status === 'completed')
+    assert.equal(successfulWorld.worldReviewFileRequestId, reusedFile.requestId)
+    const ledger = JSON.parse(readFileSync(join(dirname(f.runtime.authoring.store.path), 'state.json'), 'utf8'))
+      .conversations[CONVERSATION_ID].namespaces.shared.canon.events
+    assert.deepEqual(ledger.map(({ source }) => source), ['用户', '裁定'])
+    assert.equal(ledger[0].id, firstStimulusId)
+    assert.deepEqual(ledger[1].because, [firstStimulusId])
+  } finally {
+    await f.dispose()
+  }
+})
+
+test('an armed draft review can time out without taking the fallback publication away from its author', async () => {
+  let reviewExpired
+  const waitForExpiry = new Promise(resolve => { reviewExpired = resolve })
+  const originalDraft = 'Draft submitted for approval.'
+  const fallback = 'Original publication remains under the writer’s control.'
+  const f = fixture({ executeChild: async ({ agent, invoke, concluded }) => {
+    if (agent.session.id === 'native-child-1') {
+      await assert.rejects(() => invoke('rp_team_request', {
+        to: 'agent-2', handoffId: 'check-draft', publishOnPass: true, data: { draft: originalDraft }
+      }), { code: 'RP_TEAM_HANDOFF_TIMEOUT' })
+      assert.equal(concluded(), false)
+      reviewExpired()
+      await invoke('rp_team_publish', { body: fallback })
+      return
+    }
+    await waitForExpiry
+    await assert.rejects(() => invoke('rp_team_submit_internal', { summary: 'Late approval', data: { pass: true } }),
+      { code: 'RP_TEAM_HANDOFF_FAILED' })
+  } })
+  try {
+    await f.configure(automaticDraftConfig({ timeoutMs: 70 }))
+    await f.startRootTurn()
+    const { body } = await f.runLocalDelivery()
+    assert.equal(body, fallback)
+    assert.equal(f.stageCalls.length, 1)
+    const committed = await f.commitRootTurn(body)
+    assert.equal(committed.run.phase, 'complete')
+  } finally {
+    await f.dispose()
+  }
+})
+
 test('native Agent hooks run two scoped members, keep product tools denied, and stage one local delivery for the Host receipt', async () => {
   const f = fixture()
   try {
@@ -634,6 +1108,9 @@ test('native Agent hooks run two scoped members, keep product tools denied, and 
     const memberInput = trace.events.find(event => event.type === 'model.input' && event.data.sessionId === 'native-child-1')
     assert.ok(memberAgent && memberAgent !== trace.events.find(event => event.type === 'publication.local_delivery_route')?.agentId)
     assert.equal(memberInput?.agentId, memberAgent)
+    const retry = trace.events.find(event => event.type === 'model.retry')
+    assert.equal(retry?.agentId, memberAgent, 'a DSH step retry is traced under the member whose step was repeated')
+    assert.deepEqual(retry.data, { sessionId: 'native-child-1', turn: 1, step: 1, retry: 1, maxRetries: 5, delayMs: 500, code: 'MALFORMED_RESPONSE' })
 
     const committed = await f.commitRootTurn(body, activeNoticeReason)
     assert.equal(committed.run.phase, 'complete')

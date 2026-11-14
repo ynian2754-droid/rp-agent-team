@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { createCommunication } from '../src/host/communication.mjs'
+import { createCommunication, mergeDraftReviewIssues, parallelDraftReviewPeer } from '../src/host/communication.mjs'
 import { interruptPersistedRequests, readRequestRecords } from '../src/host/request-persistence.mjs'
 import { createScheduler } from '../src/host/scheduler.mjs'
 import { defaultTeamConfig, exportPreset, normalizeTeamConfig } from '../src/shared/schema.mjs'
+import { exportComponent } from '../src/shared/components.mjs'
+import { portablePreset } from '../src/host/preset-library.mjs'
 
 const responseSchema = {
   type: 'object', required: ['summary', 'data'], properties: {
@@ -46,6 +48,149 @@ function deferred() {
   const promise = new Promise(done => { resolve = done })
   return { promise, resolve }
 }
+
+function parallelHandoffConfig() {
+  const config = handoffConfig()
+  config.execution.concurrency = 2
+  config.output = { agentId: 'requester' }
+  const [requester, target] = config.agents
+  const other = { ...structuredClone(target), id: 'other' }
+  config.agents.push(other)
+  for (const key of ['sendTo', 'receiveFrom', 'requestTo']) requester.communication[key].push(other.id)
+  const [rule] = requester.communication.handoffs
+  rule.parallel = true
+  rule.references = true
+  requester.communication.handoffs.push({ ...rule, id: 'lookup-other', to: other.id })
+  return config
+}
+
+const parallelRequests = [
+  { to: 'target', handoffId: 'lookup', summary: 'Find the clue', data: { query: 'where is the key' } },
+  { to: 'other', handoffId: 'lookup-other', summary: 'Find another clue', data: { query: 'where is the lock' } }
+]
+
+test('draft review retains the exact forwarded world result binding only in the request record', async () => {
+  const config = handoffConfig()
+  const [writer, checker] = config.agents
+  writer.communication.handoffs = [{ id: 'check-draft', to: checker.id, mode: 'await', references: true,
+    scopedReview: true, compactReview: 'draft', timeoutMs: 1000 }]
+  checker.execution = { after: [], livedHistoryDialoguePremises: true }
+  const world = (requestId, ref, sourceExecutionId) => ({ requestId, ref, sourceExecutionId, handoffId: 'ask-world',
+    status: 'completed', from: writer.id, result: { data: { established: [], surface: {} } } })
+  const run = { handoffRequests: [world('old-world', 'ask-world#1', 'writer:0'),
+    world('world-a', 'ask-world#2', 'writer:1'), world('world-b', 'ask-world#3', 'writer:1')] }
+  const communication = createCommunication(config, { run, async onRequest({ requestId }) {
+    await communication.bindTargetExecution(requestId, 'checker:1')
+    await communication.completeTarget({ requestId, targetExecutionId: 'checker:1', result: { data: { pass: true, issues: [] } } })
+  } })
+  const request = async world_return => {
+    await communication.request({ from: writer.id, to: checker.id, executionId: 'writer:1',
+      handoffId: 'check-draft', data: { draft: '正文。', world_return } })
+    return run.handoffRequests.at(-1)
+  }
+  const linked = await request({ $ref: 'ask-world#2' })
+  assert.equal(linked.worldReviewRequestId, 'world-a')
+  assert.ok(!Object.hasOwn(communication.allMessages().find(message => message.requestId === linked.requestId), 'worldReviewRequestId'))
+  assert.equal((await request({ $ref: 'ask-world#1' })).worldReviewRequestId, undefined)
+  assert.equal((await request({ $ref: 'ask-world#2', pointer: '/surface' })).worldReviewRequestId, undefined)
+  assert.equal((await request({ established: [] })).worldReviewRequestId, undefined)
+  checker.execution = { after: [] }
+  assert.equal((await request({ $ref: 'ask-world#2' })).worldReviewRequestId, undefined)
+})
+
+test('parallel handoffs overlap under the scheduler and release and reacquire the requester slot once', async () => {
+  const config = parallelHandoffConfig()
+  const bothRunning = deferred()
+  const secondFinished = deferred()
+  const started = []
+  const events = []
+  let result
+  let scheduler
+  const communication = createCommunication(config, {
+    onRequest: activation => scheduler.requestActivation(activation),
+    onAwait: ({ from, requestId, promise }) => scheduler.waitForHandoff({ agentId: from, requestId, promise }),
+    onTrace: event => events.push(event)
+  })
+  scheduler = createScheduler({
+    config, onTrace: event => events.push(event),
+    async onActivate({ agent, activation }) {
+      if (agent.id === 'requester') {
+        result = await communication.requestMany({ from: agent.id, executionId: 'requester:1', requests: parallelRequests })
+        return
+      }
+      await communication.bindTargetExecution(activation.requestId, agent.id)
+      started.push(agent.id)
+      if (started.length === 2) bothRunning.resolve()
+      await bothRunning.promise
+      if (agent.id === 'other') throw Object.assign(new Error('Other target failed'), { code: 'TEST_FAILURE' })
+      await secondFinished.promise
+    },
+    async onActivationTerminal({ agent, activation, status, error }) {
+      if (!activation.requestId) return
+      if (status === 'complete') {
+        await communication.completeTarget({ requestId: activation.requestId, targetExecutionId: agent.id,
+          result: { typed: true, summary: 'Key found', data: { facts: ['key'] } } })
+      } else {
+        await communication.failTarget({ requestId: activation.requestId, targetExecutionId: agent.id, error })
+        secondFinished.resolve()
+      }
+    }
+  })
+  await scheduler.run()
+  assert.deepEqual(started, ['target', 'other'])
+  assert.deepEqual(result, { results: [
+    { handoffId: 'lookup', status: 'completed', ref: 'lookup#1', summary: 'Key found', data: { facts: ['key'] } },
+    { handoffId: 'lookup-other', status: 'failed', error: { code: 'TEST_FAILURE', message: 'Other target failed' } }
+  ] })
+  assert.deepEqual(events.filter(event => event.type === 'activation.slot_released' || event.type === 'activation.slot_reacquired')
+    .map(event => [event.type, event.agentId]), [['activation.slot_released', 'requester'], ['activation.slot_reacquired', 'requester']])
+  assert.deepEqual(events.filter(event => event.type === 'handoff.failed' || event.type === 'handoff.completed')
+    .map(event => event.data.handoffId), ['lookup-other', 'lookup'])
+})
+
+test('parallel handoff preflight rejects the whole batch before dispatch for invalid, dependent, or unconfigured entries', async () => {
+  const config = parallelHandoffConfig()
+  const seen = []
+  const communication = createCommunication(config, { onRequest: activation => seen.push(activation) })
+  const run = (requests, depth) => communication.requestMany({ from: 'requester', requests, depth })
+  const [first, other] = parallelRequests
+  await assert.rejects(run([first, { ...other, data: {} }]), { code: 'RP_TEAM_HANDOFF_REQUEST_INVALID' })
+  await assert.rejects(run([first, { ...other, to: 'requester' }]), { code: 'RP_TEAM_REQUEST_NOT_ALLOWED' })
+  await assert.rejects(run([first, first]), { code: 'RP_TEAM_HANDOFF_BATCH_INVALID' })
+  await assert.rejects(run([first, other], 4), { code: 'RP_TEAM_ACTIVATION_DEPTH' })
+  config.agents[2].execution.after.push('target')
+  await assert.rejects(run([first, other]), { code: 'RP_TEAM_HANDOFF_BATCH_INVALID' })
+  config.agents[2].execution.after.pop()
+  config.agents[0].communication.handoffs[1].parallel = false
+  await assert.rejects(run([first, other]), { code: 'RP_TEAM_HANDOFF_BATCH_INVALID' })
+  assert.deepEqual(seen, [])
+  assert.deepEqual(communication.allMessages(), [])
+  assert.deepEqual(communication.pendingRequests(), [])
+})
+
+test('cancelling a batch before its activations dispatch settles both branches without starting those activations', async () => {
+  const dispatchReady = deferred()
+  const releaseDispatch = deferred()
+  const seen = []
+  let changes = 0
+  const communication = createCommunication(parallelHandoffConfig(), {
+    onRequest: activation => seen.push(activation),
+    onChange: () => {
+      changes++
+      if (changes === 2) dispatchReady.resolve()
+      if (changes <= 2) return releaseDispatch.promise
+    }
+  })
+  const outcome = communication.requestMany({ from: 'requester', requests: parallelRequests })
+  await dispatchReady.promise
+  await communication.cancelAll('Stopped')
+  releaseDispatch.resolve()
+  assert.deepEqual(await outcome, { results: parallelRequests.map(({ handoffId }) => ({
+    handoffId, status: 'failed', error: { code: 'RP_TEAM_CANCELLED', message: 'Stopped' }
+  })) })
+  assert.deepEqual(seen, [])
+  assert.deepEqual(communication.pendingRequests(), [])
+})
 
 function scheduleConfig({ maxActivations = 8, maxPerAgent = 4 } = {}) {
   return {
@@ -246,7 +391,8 @@ test('await handoff projects both envelopes, rejects unrelated target executions
   try {
     const result = await communication.request({ from: 'requester', to: 'target', handoffId: 'lookup',
       summary: 'Find the clue', data: { query: 'where is the key', secret: 'strip me' }, executionId: 'run-new:requester:1' })
-    assert.deepEqual(result, { summary: 'Found the clue.', data: { facts: ['blue door'] } })
+    assert.deepEqual(result, { summary: 'Found the clue.', data: { facts: ['blue door'] } },
+      'a team without references keeps the plain projected result')
     const request = communication.messagesFor('target').find(message => message.type === 'request')
     assert.deepEqual({ summary: request.summary, data: request.data }, {
       summary: 'Find the clue', data: { query: 'where is the key' }
@@ -320,11 +466,126 @@ test('a successful completed target is reused only for an explicit matching retr
   assert.equal(activationCalls, 0)
   const request = communication.allMessages().find(message => message.type === 'request')
   const row = communication.getRequest(request.requestId)
+  assert.equal(row.ref, 'lookup#1', 'a reused request is numbered in the new run')
   const reused = communication.allMessages().find(message => message.type === 'handoff_result')
   assert.deepEqual({ summary: reused.summary, data: reused.data }, source.result)
+  assert.equal(Object.hasOwn(reused, 'ref'), false, 'members that cannot write references never see one')
   assert.equal(communication.pendingRequests().length, 0)
   assert.equal(row.reusedFromRunId, 'old-run')
   assert.equal(row.targetExecutionId, 'old-run:target:1')
+})
+
+// A requester with one plain await handoff (lookup) and one that allows references (forward). Each request is
+// answered from `answers` in order; `fail` answers with an error instead.
+function referenceHarness({ answers = [], fail } = {}) {
+  const config = handoffConfig()
+  config.agents[0].communication.handoffs.push({ id: 'forward', to: 'target', mode: 'await', references: true, timeoutMs: 1000, onFailure: 'return_error',
+    requestSchema: { type: 'object', required: ['data'], properties: { data: { type: 'object', required: ['first'], properties: { first: { type: 'array', items: { type: 'string' } } } } } } })
+  const trace = []
+  const queue = [...answers]
+  let communication
+  communication = createCommunication(config, {
+    run: { runId: 'run', conversationId: 'conversation' }, onTrace: event => trace.push(event), setTimer: () => 1, clearTimer() {},
+    onRequest: ({ requestId }) => {
+      queueMicrotask(async () => {
+        await communication.bindTargetExecution(requestId, `run:target:${requestId}`)
+        if (fail) await communication.failTarget({ requestId, targetExecutionId: `run:target:${requestId}`, error: fail })
+        else await communication.completeTarget({ requestId, targetExecutionId: `run:target:${requestId}`, result: { typed: true, ...queue.shift() } })
+      })
+      return { queued: true, requestId }
+    }
+  })
+  return { communication, trace }
+}
+
+test('handoff references forward an earlier result or request verbatim, numbered per sender and handoff', async () => {
+  const { communication, trace } = referenceHarness({ answers: [
+    { summary: 'First.', data: { facts: ['blue door', 'under "the" cup'] } },
+    { summary: 'Second.', data: { facts: ['red key'] } },
+    { summary: 'Forwarded.' }
+  ] })
+  const ask = query => communication.request({ from: 'requester', to: 'target', handoffId: 'lookup', summary: 'Find', data: { query }, executionId: 'run:requester:1' })
+  assert.deepEqual(await ask('where is the key'), { ref: 'lookup#1', summary: 'First.', data: { facts: ['blue door', 'under "the" cup'] } },
+    'a member that can write references receives each result with the ref that names it')
+  assert.equal((await ask('where is the door')).ref, 'lookup#2')
+  assert.equal(communication.allMessages().find(message => message.type === 'handoff_result').ref, 'lookup#1')
+
+  await communication.request({ from: 'requester', to: 'target', handoffId: 'forward', summary: 'Both answers', executionId: 'run:requester:1', data: {
+    first: { $ref: 'lookup#1', pointer: '/facts' },
+    second: { $ref: 'lookup#2' },
+    asked: [{ $ref: 'lookup#1', side: 'request' }],
+    literal: { $ref: 'lookup#1', note: 'extra keys make this ordinary data' }
+  } })
+  const forwarded = communication.messagesFor('target').filter(message => message.type === 'request').at(-1)
+  assert.deepEqual(forwarded.data, {
+    first: ['blue door', 'under "the" cup'],
+    second: { facts: ['red key'] },
+    asked: [{ query: 'where is the key' }],
+    literal: { $ref: 'lookup#1', note: 'extra keys make this ordinary data' }
+  })
+  assert.equal(communication.getRequest(forwarded.requestId).ref, 'forward#1')
+  assert.deepEqual(trace.find(event => event.type === 'handoff.refs_resolved'), {
+    type: 'handoff.refs_resolved', agentId: 'requester', data: { handoffId: 'forward', direction: 'request', refs: [
+      { ref: 'lookup#1', side: 'result', pointer: '/facts', at: '/first' },
+      { ref: 'lookup#2', side: 'result', at: '/second' },
+      { ref: 'lookup#1', side: 'request', at: '/asked/0' }
+    ] }
+  })
+
+  // Answers that forward by reference resolve against what the answering member itself sent.
+  const answer = communication.resolveRefs({ writer: 'requester', data: { attempts: { $ref: 'lookup#2', pointer: '/facts' } }, handoffId: 'forward' })
+  assert.deepEqual(answer.data, { attempts: ['red key'] })
+  answer.trace()
+  assert.equal(trace.filter(event => event.type === 'handoff.refs_resolved').at(-1).data.direction, 'response')
+  assert.throws(() => communication.resolveRefs({ writer: 'target', data: { x: { $ref: 'lookup#1' } } }),
+    { code: 'RP_TEAM_HANDOFF_REF_INVALID', message: /does not name a request you sent.*You have sent no handoff requests/su },
+    'a member cannot reference another member’s requests')
+
+  // The answering side resolves only for a handoff that allows references, and only for its target.
+  const plain = communication.getRequest(communication.allMessages().find(message => message.handoffId === 'lookup').requestId)
+  const reference = { x: { $ref: 'lookup#1' } }
+  assert.deepEqual(communication.resolveAnswerRefs({ requestId: plain.requestId, agentId: 'target', data: reference }).data, reference)
+  assert.deepEqual(communication.resolveAnswerRefs({ requestId: forwarded.requestId, agentId: 'requester', data: reference }).data, reference,
+    'only the target answers a request')
+  assert.throws(() => communication.resolveAnswerRefs({ requestId: forwarded.requestId, agentId: 'target', data: reference }),
+    { code: 'RP_TEAM_HANDOFF_REF_INVALID', message: /You have sent no handoff requests/u },
+    'the target’s answer resolves against requests the target sent')
+  assert.equal(communication.resolveAnswerRefs({ requestId: forwarded.requestId, agentId: 'target' }).data, undefined)
+})
+
+test('a bad handoff reference is returned to the writer with the references it can use; plain handoffs never resolve', async () => {
+  const { communication } = referenceHarness({ answers: [{ summary: 'First.', data: { facts: ['blue door'] } }] })
+  await communication.request({ from: 'requester', to: 'target', handoffId: 'lookup', summary: 'Find', data: { query: 'key' }, executionId: 'run:requester:1' })
+  const forward = data => communication.request({ from: 'requester', to: 'target', handoffId: 'forward', summary: 'x', data, executionId: 'run:requester:1' })
+  await assert.rejects(forward({ first: { $ref: 'lookup#3' } }),
+    { code: 'RP_TEAM_HANDOFF_REF_INVALID', message: /lookup#3 at \/first does not name a request you sent in this run\. References you can use: lookup#1 \(result and request\)\./u })
+  await assert.rejects(forward({ first: { $ref: 'lookup#1', pointer: '/missing' } }),
+    { code: 'RP_TEAM_HANDOFF_REF_INVALID', message: /finds nothing at result data\/missing/u })
+  await assert.rejects(forward({ first: { $ref: 'lookup#1', side: 'answer' } }), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+  await assert.rejects(forward({ first: { $ref: 'lookup#1' } }), { code: 'RP_TEAM_HANDOFF_REQUEST_INVALID' },
+    'the expanded original is still checked against the request schema')
+  await assert.rejects(communication.request({ from: 'requester', to: 'target', handoffId: 'lookup', summary: 'x',
+    data: { query: { $ref: 'lookup#1' } }, executionId: 'run:requester:1' }), { code: 'RP_TEAM_HANDOFF_REQUEST_INVALID' },
+  'a handoff without references keeps $ref objects as ordinary data')
+})
+
+test('a failed target reaches the requester without the raw model output; the request row keeps the full text', async () => {
+  const upstream = 'Tool call "rp_team_submit_internal": Expected \',\' or \']\' after array element in JSON at position 2898\n\nReceived arguments:\n{"attempts": [{"beats": [}]}'
+  const { communication } = referenceHarness({ fail: new Error(upstream) })
+  await assert.rejects(communication.request({ from: 'requester', to: 'target', handoffId: 'lookup', summary: 'Find', data: { query: 'key' }, executionId: 'run:requester:1' }),
+    error => {
+      assert.equal(error.code, 'RP_TEAM_HANDOFF_FAILED')
+      assert.equal(error.message, 'Target target failed: its model produced malformed arguments for tool rp_team_submit_internal; nothing from that output was returned.')
+      return true
+    })
+  const delivered = communication.allMessages().find(message => message.type === 'handoff_result')
+  assert.equal(delivered.status, 'failed')
+  assert.equal(JSON.stringify(delivered).includes('Received arguments'), false)
+  assert.equal(communication.getRequest(delivered.requestId).error.message, upstream, 'the row and the trace keep the full upstream text')
+
+  const long = referenceHarness({ fail: new Error(`${'x'.repeat(600)}\n\nReceived arguments:\n{}`) })
+  await assert.rejects(long.communication.request({ from: 'requester', to: 'target', handoffId: 'lookup', summary: 'Find', data: { query: 'key' }, executionId: 'run:requester:1' }),
+    error => error.message === `${'x'.repeat(400)}…`)
 })
 
 test('resume retry reuse reserves only the new source activation and queues it after that activation completes', async () => {
@@ -408,4 +669,187 @@ test('handoff schemas normalize selectors, defaults, uniqueness, target referenc
   const invalidTarget = structuredClone(withRule)
   invalidTarget.agents[0].communication.handoffs[0].to = 'missing-agent'
   assert.throws(() => normalizeTeamConfig(invalidTarget), /unknown agent/u)
+
+  const withReferences = structuredClone(withRule)
+  withReferences.agents[0].communication.handoffs[0].references = true
+  assert.equal(normalizeTeamConfig(withReferences).agents[0].communication.handoffs[0].references, true)
+  assert.equal(exportPreset(withReferences).dependencies.minimumPluginVersion, '0.7.4', 'references need plugin 0.7.4')
+  withReferences.agents[0].communication.handoffs[0].references = false
+  assert.equal(Object.hasOwn(normalizeTeamConfig(withReferences).agents[0].communication.handoffs[0], 'references'), false)
+  withReferences.agents[0].communication.handoffs[0].references = 'yes'
+  assert.throws(() => normalizeTeamConfig(withReferences), /Handoff references must be true or false/u)
+})
+
+test('terminal handoffs require typed responses and export the 0.7.5 requirement', () => {
+  const config = defaultTeamConfig()
+  const handoff = { id: 'lookup', to: 'agent-2', mode: 'await', responseSchema, references: true, terminal: true }
+  config.agents[0].communication.handoffs = [handoff]
+  assert.equal(normalizeTeamConfig(config).agents[0].communication.handoffs[0].terminal, true)
+  assert.equal(exportPreset(config).dependencies.minimumPluginVersion, '0.7.5')
+  assert.equal(portablePreset(config).dependencies.minimumPluginVersion, '0.7.5')
+  assert.equal(exportComponent(config, ['agent-1'], 'Terminal requester').dependencies.minimumPluginVersion, '0.7.5')
+  handoff.mode = 'resume'
+  assert.equal(normalizeTeamConfig(config).agents[0].communication.handoffs[0].terminal, true)
+  handoff.mode = 'notify'
+  assert.throws(() => normalizeTeamConfig(config), /A terminal handoff must await or resume and have a responseSchema/u)
+  handoff.mode = 'await'
+  delete handoff.responseSchema
+  assert.throws(() => normalizeTeamConfig(config), /A terminal handoff must await or resume and have a responseSchema/u)
+  handoff.terminal = false
+  assert.equal(Object.hasOwn(normalizeTeamConfig(config).agents[0].communication.handoffs[0], 'terminal'), false)
+})
+
+test('parallel handoffs are await-only and survive exports with the 0.7.6 requirement', () => {
+  const config = defaultTeamConfig()
+  const handoff = { id: 'lookup', to: 'agent-2', mode: 'await', parallel: true }
+  config.agents[0].communication.handoffs = [handoff]
+  const preset = exportPreset(config)
+  assert.equal(preset.config.agents[0].communication.handoffs[0].parallel, true)
+  assert.equal(preset.dependencies.minimumPluginVersion, '0.7.6')
+  assert.equal(portablePreset(config).dependencies.minimumPluginVersion, '0.7.6')
+  assert.equal(exportComponent(config, ['agent-1'], 'Parallel requester').dependencies.minimumPluginVersion, '0.7.6')
+  handoff.mode = 'resume'
+  assert.throws(() => normalizeTeamConfig(config), /Only await handoffs/u)
+  handoff.parallel = 'yes'
+  assert.throws(() => normalizeTeamConfig(config), /Handoff parallel must be true or false/u)
+})
+
+test('an approved draft reference only resolves the requesting writer’s passed request text', async () => {
+  const config = handoffConfig('await', { requestSelectors: undefined, responseSelectors: undefined })
+  const rule = config.agents[0].communication.handoffs[0]
+  delete rule.requestSchema
+  delete rule.requestSelectors
+  delete rule.responseSelectors
+  rule.responseSchema = { type: 'object', required: ['data'], properties: {
+    data: { type: 'object', required: ['pass'], properties: { pass: { type: 'boolean' } } }
+  } }
+  rule.references = true
+  rule.terminal = true
+  const draft = '\n  这一份原稿。\r\n'
+  const responseTrace = []
+  let pass = false
+  const communication = createCommunication(config, {
+    onTrace: event => responseTrace.push(event),
+    onRequest: async ({ requestId }) => {
+      await communication.bindTargetExecution(requestId, 'check-execution')
+      await communication.completeTarget({ requestId, targetExecutionId: 'check-execution', result: { summary: 'Check complete', data: { pass }, typed: true } })
+    }
+  })
+  const request = () => communication.request({ from: 'requester', to: 'target', handoffId: 'lookup', data: { draft, unrelated: 'other field' } })
+  const reference = $ref => ({ $ref, side: 'request', pointer: '/draft' })
+  const rejected = await request()
+  assert.throws(() => communication.resolveApprovedBody({ writer: 'requester', bodyRef: reference(rejected.ref) }), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+  pass = true
+  const approved = await request()
+  assert.throws(() => communication.resolveApprovedBody({ writer: 'target', bodyRef: reference(approved.ref) }), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+  assert.throws(() => communication.resolveApprovedBody({ writer: 'requester', bodyRef: { ...reference(approved.ref), pointer: '/unrelated' } }), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+  const result = communication.resolveApprovedBody({ writer: 'requester', bodyRef: reference(approved.ref) })
+  assert.equal(result.data, draft)
+  result.trace()
+  assert.ok(responseTrace.some(event => event.type === 'handoff.refs_resolved' && event.data.direction === 'publication'))
+})
+
+test('parallel draft review merges exact ordered issues and preserves individual receipts', async t => {
+  const config = parallelHandoffConfig()
+  const writer = config.agents[0]
+  writer.execution.livedHistoryParallelDraftReview = true
+  writer.execution.livedHistoryWriterPresentation = true
+  const [fact, presentation] = writer.communication.handoffs
+  const verdictSchema = { type: 'object', required: ['data'], properties: { data: {
+    type: 'object', required: ['pass', 'issues'], properties: { pass: { type: 'boolean' }, issues: { type: 'array' } }
+  } } }
+  for (const [index, rule] of [fact, presentation].entries()) {
+    Object.assign(rule, { id: index ? 'check-draft-presentation' : 'check-draft', compactReview: 'draft',
+      scopedReview: true, terminal: true, autoPublish: !index, responseSchema: verdictSchema })
+    delete rule.requestSchema
+    delete rule.requestSelectors
+    delete rule.responseSelectors
+  }
+  const draft = '灰色的按钮。黑笔迹。看见暗屏通知。'
+  const left = { kind: '未确立的事', quote: '黑笔迹。', note: '无该事实。' }
+  const right = { kind: '知情越界', quote: '看见暗屏通知。', note: '暗屏不可知。' }
+  const pass = { pass: true, issues: [] }
+  const fail = (...issues) => ({ pass: false, issues })
+  let verdicts = [fail(right, left), fail({ ...right, note: '没有可见来源。' })]
+  const run = { conversationId: 'conversation', runId: 'parallel-review' }
+  const traceRoot = mkdtempSync(join(tmpdir(), 'rp-team-paired-review-'))
+  t.after(() => rmSync(traceRoot, { recursive: true, force: true }))
+  const arrivals = []
+  const writerProof = [{ event: 'world-event', coverage: 'full', quotes: ['灰色的按钮。'] }]
+  const communication = createCommunication(config, { run, requestTraceRoot: traceRoot, onWriterPresentation: () => writerProof,
+    async onRequest(activation) {
+    arrivals.push(activation)
+    const lane = activation.handoffId === fact.id ? 0 : 1
+    const targetExecutionId = `checker:${activation.requestId}`
+    await communication.bindTargetExecution(activation.requestId, targetExecutionId)
+    const data = verdicts[lane]
+    if (data) await communication.completeTarget({ requestId: activation.requestId, targetExecutionId, result: { data, typed: true } })
+    else await communication.failTarget({ requestId: activation.requestId, targetExecutionId, error: { code: 'RP_TEAM_HANDOFF_TIMEOUT', message: 'late' } })
+  } })
+  const make = (rule, text = draft) => ({ to: rule.to, handoffId: rule.id, data: { draft: text, world_return: {} } })
+  const request = (secondDraft = draft) => communication.requestMany({ from: writer.id, executionId: 'writer:1',
+    draftReview: true, requests: [make(fact), make(presentation, secondDraft)] })
+  const bodyFrom = $ref => communication.resolveApprovedBody({ writer: writer.id, bodyRef: { $ref, side: 'request', pointer: '/draft' } })
+  assert.equal(parallelDraftReviewPeer(writer), presentation)
+  await assert.rejects(request('另一份稿。'), { code: 'RP_TEAM_HANDOFF_BATCH_INVALID' })
+  assert.equal(arrivals.length, 0)
+  const first = await request()
+  assert.deepEqual(first.review, { ref: 'check-draft#1', data: fail(left, { ...right, note: '暗屏不可知。\n没有可见来源。' }), incomplete: false })
+  assert.throws(() => bodyFrom(first.review.ref), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+  const pair = readRequestRecords(traceRoot, run.conversationId, run.runId)
+  assert.deepEqual(pair.map(row => row.result.data), verdicts)
+  assert.equal(pair[0].draftReviewBatchId, pair[1].draftReviewBatchId)
+  assert.deepEqual(pair[0].mergedDraftReview.verdict, first.review.data)
+  assert.deepEqual(pair[0].writerPresentation, writerProof)
+  assert.deepEqual(pair[1].writerPresentation, [])
+  assert.ok(communication.allMessages().every(message => !Object.hasOwn(message, 'writerPresentation')))
+
+  verdicts = [pass, undefined]
+  const timeout = await request()
+  assert.deepEqual(timeout.review, { ref: 'check-draft#2', data: fail(), incomplete: true })
+  assert.throws(() => bodyFrom(timeout.review.ref), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+  verdicts = [undefined, fail(right)]
+  const partial = await request()
+  assert.deepEqual(partial.review, { ref: 'check-draft#3', data: fail(right), incomplete: true })
+  assert.throws(() => bodyFrom(partial.review.ref), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+
+  verdicts = [pass, pass]
+  const approved = await request()
+  assert.deepEqual(approved.review, { ref: 'check-draft#4', data: pass, incomplete: false })
+  assert.equal(bodyFrom(approved.review.ref).data, draft)
+  assert.throws(() => bodyFrom(approved.results[1].ref), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+  const lone = await communication.request({ from: writer.id, executionId: 'writer:1', ...make(fact) })
+  assert.throws(() => bodyFrom(lone.ref), { code: 'RP_TEAM_HANDOFF_REF_INVALID' })
+  assert.deepEqual(mergeDraftReviewIssues(draft, [pass, fail({ ...right, quote: '改述。' })]),
+    { verdict: fail(), incomplete: true })
+
+  writer.communication.handoffs.pop()
+  assert.equal(parallelDraftReviewPeer(writer), undefined)
+  const legacy = await communication.request({ from: writer.id, executionId: 'writer:1', ...make(fact) })
+  assert.equal(bodyFrom(legacy.ref).data, draft)
+})
+
+test('a sealed terminal response clears the timeout while native completion still controls delivery', async () => {
+  const config = handoffConfig()
+  config.agents[0].communication.handoffs[0].terminal = true
+  const ready = deferred()
+  const timer = {}
+  const cleared = []
+  const communication = createCommunication(config, {
+    setTimer: () => timer,
+    clearTimer: value => cleared.push(value),
+    onRequest: async ({ requestId }) => {
+      await communication.bindTargetExecution(requestId, 'exec')
+      ready.resolve(requestId)
+    }
+  })
+  const result = communication.request({ from: 'requester', to: 'target', handoffId: 'lookup', summary: 'Find', data: { query: 'item' } })
+  const id = await ready.promise
+  const answer = { summary: 'Done', data: { facts: ['found'] }, typed: true }
+  assert.equal(communication.checkTargetResult({ requestId: id, agentId: 'target', result: answer }), true)
+  communication.sealTargetResult(id)
+  assert.deepEqual(cleared, [timer])
+  assert.equal(communication.getRequest(id).status, 'running')
+  assert.equal(await communication.completeTarget({ requestId: id, targetExecutionId: 'exec', result: answer }), true)
+  assert.deepEqual(await result, { summary: 'Done', data: { facts: ['found'] } })
 })

@@ -1,5 +1,5 @@
 import { formatValueIssues, normalizeValueSchema, validateValueSchema } from './value-schema.mjs'
-import { normalizeAuthorParameters, usesParameterInsertions } from './author-parameters.mjs'
+import { normalizeAuthorParameters, usesParameterInsertions, usesParameterStructure } from './author-parameters.mjs'
 import { normalizeMemoryConfig } from './memory.mjs'
 export { normalizeValueSchema, validateValueSchema } from './value-schema.mjs'
 
@@ -261,7 +261,7 @@ export function normalizeTeamConfig(value) {
     state,
     execution,
     output,
-    ...(value.authorParameters === undefined ? {} : { authorParameters: normalizeAuthorParameters(value.authorParameters, agents, state.definitions) }),
+    ...(value.authorParameters === undefined ? {} : { authorParameters: normalizeAuthorParameters(value.authorParameters, agents, state.definitions, output.agentId) }),
     ...(value.memory === undefined ? {} : { memory: normalizeMemoryConfig(value.memory, agents, state.definitions) })
   }
 }
@@ -457,12 +457,14 @@ function normalizeCommunication(value = {}) {
   }
 }
 
+const FAST_HANDOFF_OPTIONS = ['simulation', 'materialPack', 'autoPublish']
+
 function normalizeHandoffs(value) {
   if (!Array.isArray(value)) throw teamError('RP_TEAM_INVALID_CONFIG', 'communication.handoffs must be a list')
   const ids = new Set()
   return value.map(item => {
     if (!isRecord(item)) throw teamError('RP_TEAM_INVALID_CONFIG', 'Each handoff must be an object')
-    rejectUnknown(item, ['id', 'to', 'mode', 'requestSchema', 'responseSchema', 'requestSelectors', 'responseSelectors', 'timeoutMs', 'onFailure'], 'Handoff')
+    rejectUnknown(item, ['id', 'to', 'mode', 'requestSchema', 'responseSchema', 'requestSelectors', 'responseSelectors', 'timeoutMs', 'onFailure', 'references', 'terminal', 'parallel', 'compactReview', 'scopedReview', ...FAST_HANDOFF_OPTIONS], 'Handoff')
     const id = identifier(item.id, 'handoff id')
     if (ids.has(id)) throw teamError('RP_TEAM_INVALID_CONFIG', `Duplicate handoff id: ${id}`)
     ids.add(id)
@@ -470,7 +472,33 @@ function normalizeHandoffs(value) {
     const timeoutMs = item.timeoutMs ?? 300000, onFailure = item.onFailure ?? 'return_error'
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw teamError('RP_TEAM_INVALID_CONFIG', 'Handoff timeoutMs must be a positive integer')
     if (!['return_error', 'stop'].includes(onFailure)) throw teamError('RP_TEAM_INVALID_CONFIG', 'Handoff onFailure must be return_error or stop')
-    const result = { id, to: identifier(item.to, 'handoff target'), mode: item.mode, timeoutMs, onFailure }
+    if (item.references !== undefined && typeof item.references !== 'boolean') throw teamError('RP_TEAM_INVALID_CONFIG', 'Handoff references must be true or false')
+    if (item.terminal !== undefined && typeof item.terminal !== 'boolean') throw teamError('RP_TEAM_INVALID_CONFIG', 'Handoff terminal must be true or false')
+    if (item.terminal && (item.mode === 'notify' || item.responseSchema === undefined)) {
+      throw teamError('RP_TEAM_INVALID_CONFIG', 'A terminal handoff must await or resume and have a responseSchema')
+    }
+    if (item.parallel !== undefined && typeof item.parallel !== 'boolean') throw teamError('RP_TEAM_INVALID_CONFIG', 'Handoff parallel must be true or false')
+    if (item.parallel && item.mode !== 'await') throw teamError('RP_TEAM_INVALID_CONFIG', 'Only await handoffs can participate in a parallel request')
+    const result = { id, to: identifier(item.to, 'handoff target'), mode: item.mode, timeoutMs, onFailure, ...(item.references ? { references: true } : {}) }
+    if (item.terminal) result.terminal = true
+    if (item.parallel) result.parallel = true
+    for (const option of FAST_HANDOFF_OPTIONS) {
+      if (item[option] !== undefined && typeof item[option] !== 'boolean') throw teamError('RP_TEAM_INVALID_CONFIG', `Handoff ${option} must be true or false`)
+      if (item[option]) {
+        if (item.mode !== 'await' || !item.terminal || !item.references) throw teamError('RP_TEAM_INVALID_CONFIG', `Handoff ${option} requires terminal await and references`)
+        result[option] = true
+      }
+    }
+    if (item.compactReview !== undefined) {
+      if (!['simulation', 'draft'].includes(item.compactReview) || item.mode !== 'await' || !item.terminal || !item.references) {
+        throw teamError('RP_TEAM_INVALID_CONFIG', 'Handoff compactReview requires simulation or draft, terminal await and references')
+      }
+      result.compactReview = item.compactReview
+    }
+    if (item.scopedReview !== undefined && (typeof item.scopedReview !== 'boolean' || (item.scopedReview && !result.compactReview))) {
+      throw teamError('RP_TEAM_INVALID_CONFIG', 'Handoff scopedReview requires compactReview')
+    }
+    if (item.scopedReview) result.scopedReview = true
     for (const direction of ['request', 'response']) {
       if (item[`${direction}Schema`] !== undefined) result[`${direction}Schema`] = normalizeValueSchema(item[`${direction}Schema`], `handoff ${direction} requirements`)
       const selectors = item[`${direction}Selectors`]
@@ -511,13 +539,25 @@ function normalizeAuthority(value = {}) {
 
 function normalizeAgentExecution(value = {}) {
   if (!isRecord(value)) throw teamError('RP_TEAM_INVALID_CONFIG', 'Agent execution must be an object')
-  rejectUnknown(value, ['after', 'onFailure', 'trustedTools'], 'Agent execution')
+  const flags = ['memoryAppend', 'livedHistoryWorldTurn', 'livedHistorySingleGroup', 'recoverSkippedDraftReview', 'livedHistoryGroundRefs', 'livedHistoryFocusedWorld', 'livedHistoryDirectDraftReview', 'livedHistoryTypedSimulation', 'livedHistoryDialoguePremises', 'livedHistorySceneCues', 'livedHistoryPreparedWorldClose', 'livedHistoryReviewPresentation', 'livedHistoryGroundChoices', 'livedHistoryPassageChoices', 'livedHistoryIndependentPremises', 'livedHistoryWriterPresentation', 'livedHistoryParallelDraftReview', 'livedHistoryDraftFactLane', 'livedHistoryDraftPresentationLane']
+  rejectUnknown(value, ['after', 'onFailure', 'trustedTools', 'livedHistoryPhase', ...flags], 'Agent execution')
   const onFailure = value.onFailure ?? 'continue'
   if (!FAILURE_POLICIES.has(onFailure)) throw teamError('RP_TEAM_INVALID_CONFIG', 'Agent onFailure must be continue or stop')
+  const phase = value.livedHistoryPhase
+  if (phase !== undefined && !['world', 'chronicle', 'chronicleProvenance'].includes(phase)) {
+    throw teamError('RP_TEAM_INVALID_CONFIG', 'Invalid Lived History execution phase')
+  }
+  for (const flag of flags) {
+    if (value[flag] !== undefined && typeof value[flag] !== 'boolean') {
+      throw teamError('RP_TEAM_INVALID_CONFIG', `Agent execution.${flag} must be a boolean`)
+    }
+  }
   return {
     after: normalizeAllowlist(value.after ?? [], 'execution.after', false),
     onFailure,
-    trustedTools: uniqueStrings(value.trustedTools ?? [], 'execution.trustedTools')
+    trustedTools: uniqueStrings(value.trustedTools ?? [], 'execution.trustedTools'),
+    ...(phase === undefined ? {} : { livedHistoryPhase: phase }),
+    ...Object.fromEntries(flags.filter(flag => value[flag]).map(flag => [flag, true]))
   }
 }
 
@@ -668,10 +708,76 @@ function evaluate(projected, condition) {
   }
 }
 
+/** True when any handoff lets its writer forward earlier handoff data by reference (plugin 0.7.4). */
+export function usesHandoffReferences(config) {
+  return (config?.agents ?? []).some(agent => (agent.communication?.handoffs ?? []).some(handoff => handoff.references === true))
+}
+
+export function usesTerminalHandoffs(config) {
+  return config.agents.some(agent => agent.communication?.handoffs?.some(handoff => handoff.terminal === true))
+}
+
+export function usesParallelHandoffs(config) {
+  return config.agents.some(agent => agent.communication?.handoffs?.some(handoff => handoff.parallel === true))
+}
+
+export function usesFastHandoffs(config) {
+  return config.agents.some(agent => agent.communication?.handoffs?.some(handoff => handoff.compactReview ||
+    FAST_HANDOFF_OPTIONS.some(key => handoff[key] === true)))
+}
+
+export function usesPreparedLivedHistory(config) {
+  return config.agents.some(agent => agent.execution?.livedHistoryPhase ||
+    agent.communication?.handoffs?.some(handoff => handoff.scopedReview))
+}
+
+export function usesChronicleProvenance(config) {
+  return config.agents.some(agent => agent.execution?.livedHistoryPhase === 'chronicleProvenance')
+}
+
+export function usesOrderedMemoryAppend(config) {
+  return config.agents.some(agent => agent.execution?.memoryAppend)
+}
+
+export function usesLivedHistoryTurnTools(config) {
+  return config.agents.some(({ execution }) =>
+    execution?.livedHistoryWorldTurn || execution?.livedHistorySingleGroup || execution?.recoverSkippedDraftReview)
+}
+
+export function usesLivedHistoryTypedTurns(config) {
+  return config.agents.some(({ execution }) => execution?.livedHistoryTypedSimulation || execution?.livedHistoryDialoguePremises ||
+    execution?.livedHistoryFocusedWorld && execution?.livedHistorySceneCues)
+}
+
+export function usesLivedHistoryParallelReview(config) {
+  return config.agents.some(({ execution }) => execution?.livedHistoryParallelDraftReview ||
+    execution?.livedHistoryDraftFactLane || execution?.livedHistoryDraftPresentationLane)
+}
+
+export function usesLivedHistoryIndependentReview(config) {
+  return config.agents.some(({ execution }) => execution?.livedHistoryIndependentPremises || execution?.livedHistoryWriterPresentation)
+}
+
+export function usesLivedHistoryRefChoices(config) {
+  return config.agents.some(({ execution }) => execution?.livedHistoryGroundChoices || execution?.livedHistoryPassageChoices)
+}
+
+export function usesLivedHistoryPreparedPublication(config) {
+  return config.agents.some(({ execution }) => execution?.livedHistoryPreparedWorldClose || execution?.livedHistoryReviewPresentation)
+}
+
+export function usesLivedHistoryFocusedHandoffs(config) {
+  return config.agents.some(({ execution }) => execution?.livedHistoryFocusedWorld || execution?.livedHistoryDirectDraftReview)
+}
+
+export function usesLivedHistoryGroundRefs(config) {
+  return config.agents.some(({ execution }) => execution?.livedHistoryGroundRefs)
+}
+
 export function exportPreset(config) {
   const normalized = normalizeTeamConfig(config)
   const dependencies = {
-    ...(usesParameterInsertions(normalized.authorParameters) ? { minimumPluginVersion: '0.7.0' } : normalized.authorParameters?.length || normalized.memory?.collections?.length || normalized.execution.budget || normalized.agents.some(agent => agent.triggers.some(trigger => ['periodic', 'state_changed', 'message_received', 'keyword'].includes(trigger.type) || trigger.cooldownTurns !== undefined || trigger.id !== undefined)) ? { minimumPluginVersion: '0.4.0' } : normalized.state.definitions.some(item => item.valueSchema) || normalized.agents.some(agent => agent.communication.handoffs?.length) ? { minimumPluginVersion: '0.3.0' } : {}),
+    ...(usesParameterStructure(normalized.authorParameters) ? { minimumPluginVersion: '0.7.19' } : usesLivedHistoryParallelReview(normalized) ? { minimumPluginVersion: '0.7.18' } : usesLivedHistoryIndependentReview(normalized) ? { minimumPluginVersion: '0.7.17' } : usesLivedHistoryRefChoices(normalized) ? { minimumPluginVersion: '0.7.16' } : usesLivedHistoryPreparedPublication(normalized) ? { minimumPluginVersion: '0.7.15' } : usesLivedHistoryTypedTurns(normalized) ? { minimumPluginVersion: '0.7.14' } : usesLivedHistoryFocusedHandoffs(normalized) ? { minimumPluginVersion: '0.7.13' } : usesLivedHistoryGroundRefs(normalized) ? { minimumPluginVersion: '0.7.12' } : usesLivedHistoryTurnTools(normalized) ? { minimumPluginVersion: '0.7.11' } : usesOrderedMemoryAppend(normalized) ? { minimumPluginVersion: '0.7.10' } : usesChronicleProvenance(normalized) ? { minimumPluginVersion: '0.7.9' } : usesPreparedLivedHistory(normalized) ? { minimumPluginVersion: '0.7.8' } : usesFastHandoffs(normalized) ? { minimumPluginVersion: '0.7.7' } : usesParallelHandoffs(normalized) ? { minimumPluginVersion: '0.7.6' } : usesTerminalHandoffs(normalized) ? { minimumPluginVersion: '0.7.5' } : usesHandoffReferences(normalized) ? { minimumPluginVersion: '0.7.4' } : usesParameterInsertions(normalized.authorParameters) ? { minimumPluginVersion: '0.7.0' } : normalized.authorParameters?.length || normalized.memory?.collections?.length || normalized.execution.budget || normalized.agents.some(agent => agent.triggers.some(trigger => ['periodic', 'state_changed', 'message_received', 'keyword'].includes(trigger.type) || trigger.cooldownTurns !== undefined || trigger.id !== undefined)) ? { minimumPluginVersion: '0.4.0' } : normalized.state.definitions.some(item => item.valueSchema) || normalized.agents.some(agent => agent.communication.handoffs?.length) ? { minimumPluginVersion: '0.3.0' } : {}),
     presets: [...new Set(normalized.agents.map(agent => agent.presetId).filter(Boolean))].sort(),
     models: [...new Map(normalized.agents
       .filter(agent => agent.modelRef !== 'inherit')

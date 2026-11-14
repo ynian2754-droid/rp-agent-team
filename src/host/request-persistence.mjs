@@ -85,7 +85,7 @@ export function createRequestPersistence(run, { traceRoot, persist = () => {}, o
     return true
   }
 
-  function complete(requestId, { targetExecutionId, result }) {
+  function complete(requestId, { targetExecutionId, result, publicationReview }) {
     const row = get(requestId)
     if (!row || TERMINAL.has(row.status)) return false
     if (!row.targetExecutionId || row.targetExecutionId !== String(targetExecutionId)) {
@@ -95,6 +95,7 @@ export function createRequestPersistence(run, { traceRoot, persist = () => {}, o
       current.status = 'completed'
       current.targetActivationComplete = true
       current.result = structuredClone(result)
+      if (publicationReview) current.publicationReview = structuredClone(publicationReview)
       current.completedAt = new Date().toISOString()
     })
     onTrace('handoff.completed', row, { targetExecutionId: row.targetExecutionId })
